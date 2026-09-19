@@ -1,0 +1,53 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="theme-color" content="#0b1019" />
+    <title>Narik · 5D Chess Analysis</title>
+    <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'%3E%3Crect width='64' height='64' rx='16' fill='%230b1019'/%3E%3Cpath d='M17 47V17l30 30V17' stroke='%2395f0d5' stroke-width='7' fill='none'/%3E%3C/svg%3E" />
+    <link rel="stylesheet" href="/styles.css" />
+    <script type="module" src="/app.js"></script>
+  </head>
+  <body>
+    <header class="topbar">
+      <a class="brand" href="/" aria-label="Narik home"><span class="brand-mark" aria-hidden="true">N<span>↗</span></span><span>NARIK <span class="brand-meta">5D CHESS</span></span></a>
+      <div class="topbar-right"><span class="connection" id="connection"><span class="status-dot"></span>Connecting</span><button class="icon-button" id="help-button" title="How to play" aria-label="How to play">?</button></div>
+    </header>
+
+    <main class="workspace">
+      <section class="multiverse" aria-labelledby="workspace-title">
+        <div class="workspace-heading"><div><p class="eyebrow">SPACE · TIME · POSSIBILITY</p><h1 id="workspace-title">Multiverse analysis</h1><p class="subtitle">Select a piece · play all required boards · submit</p></div><button class="button quiet" id="notation-button"><span aria-hidden="true">↥</span> Import / export</button></div>
+        <div class="game-toolbar">
+          <div class="turn-status"><span class="turn-piece" id="turn-piece">♔</span><div><strong id="turn-label">Loading position</strong><span id="turn-detail">Connecting to the local engine</span></div><span class="check-badge" id="check-badge" hidden>CHECK</span></div>
+          <div class="view-options"><label class="compact-label">View <select id="orientation" aria-label="Board orientation"><option value="white">White</option><option value="black">Black</option></select></label><label class="zoom-label" title="Board size"><span aria-hidden="true">−</span><input id="board-size" type="range" min="24" max="52" value="38" aria-label="Board square size" /><span aria-hidden="true">+</span></label><label class="toggle-label"><input type="checkbox" id="show-history" checked /> History</label></div>
+        </div>
+        <div class="multiverse-viewport" id="multiverse-viewport" tabindex="0" aria-label="Multiverse boards; scroll to explore timelines">
+          <div class="loading-state" id="loading-state"><span class="loading-orbit"></span><p>Opening the multiverse…</p></div>
+          <div class="timeline-grid" id="timeline-grid"></div>
+        </div>
+        <div class="board-legend"><span><i class="legend-dot current"></i>Playable board</span><span><i class="legend-dot destination"></i>Available destination</span><span><i class="legend-line"></i>Present</span><span class="board-hint" id="board-hint">Click a piece to explore its moves.</span></div>
+        <section class="pending-panel" aria-label="Current turn"><div class="pending-heading"><div><span class="eyebrow">CURRENT TURN</span><p id="pending-summary">No moves played yet</p></div><div class="turn-actions"><button class="button quiet" id="undo-button" disabled title="Undo the latest move or submitted turn"><span aria-hidden="true">↶</span> Undo</button><button class="button primary" id="submit-button" disabled>Submit turn <span aria-hidden="true">↗</span></button></div></div><div class="pending-moves" id="pending-moves"></div></section>
+      </section>
+
+      <aside class="sidebar" aria-label="Analysis and game controls">
+        <section class="panel engine-panel" aria-labelledby="engine-heading"><div class="panel-heading"><div class="heading-with-dot"><i class="engine-dot"></i><h2 id="engine-heading">Engine</h2></div><span class="small-badge" id="search-status">READY</span></div>
+          <div class="evaluation"><div><span class="eyebrow">POSITION EVALUATION</span><div class="score" id="eval-score">—</div><p id="eval-label">Run an analysis to evaluate</p></div><div class="evaluation-meter" aria-hidden="true"><div id="evaluation-fill"></div></div></div>
+          <div class="search-settings"><label>Think time<select id="time-budget"><option value="1000">1 second</option><option value="3000" selected>3 seconds</option><option value="10000">10 seconds</option><option value="30000">30 seconds</option><option value="60000">60 seconds</option></select></label><label>Max depth<select id="search-depth"><option value="2">2 turns</option><option value="3">3 turns</option><option value="4" selected>4 turns</option><option value="6">6 turns</option><option value="8">8 turns</option><option value="12">12 turns</option></select></label></div>
+          <button class="button primary analyze-button" id="analyze-button" disabled><span aria-hidden="true">◇</span><span id="analyze-label">Analyze position</span></button>
+          <div class="search-stats"><div><span>DEPTH</span><strong id="stat-depth">—</strong></div><div><span>NODES</span><strong id="stat-nodes">—</strong></div><div><span>NODES / S</span><strong id="stat-nps">—</strong></div><div><span>TIME</span><strong id="stat-time">—</strong></div></div>
+          <p id="analysis-note" class="analysis-note" hidden></p>
+          <div class="recommendation"><div class="recommendation-heading"><span class="eyebrow">BEST CONTINUATION</span><button class="text-button" id="play-button" disabled>Play best <span aria-hidden="true">↗</span></button></div><p class="recommendation-empty" id="recommendation-empty">The next possibility is waiting.</p><div id="best-move" class="best-move" hidden></div><ol class="principal-variation" id="principal-variation"></ol></div>
+          <div class="opponent-setting"><label for="ai-side">Engine plays</label><select id="ai-side"><option value="off">Analysis only</option><option value="black">Black</option><option value="white">White</option></select></div>
+        </section>
+        <section class="panel game-panel" aria-labelledby="game-heading"><div class="panel-heading"><h2 id="game-heading">Game</h2><span class="small-badge" id="timeline-count">1 TIMELINE</span></div><label class="full-label" for="variant">Starting position</label><div class="new-game-controls"><select id="variant"><option value="Standard">Standard</option></select><button class="button quiet" id="new-button" disabled>New game</button></div><div class="history-heading"><span class="eyebrow">TURN HISTORY</span><span id="history-count">0 turns</span></div><ol class="move-history" id="move-history"><li class="empty-history">Your story begins on this board.</li></ol></section>
+        <p class="sidebar-footnote">Local search. No account. Your multiverse stays here.</p>
+      </aside>
+    </main>
+
+    <div class="toast" id="toast" role="status" aria-live="polite" hidden></div>
+    <dialog id="notation-dialog"><form method="dialog" class="dialog-header"><div><p class="eyebrow">PORTABLE GAME NOTATION</p><h2>Import / export game</h2></div><button class="icon-button" aria-label="Close">×</button></form><p class="dialog-description">Copy your current game, or paste 5D Chess PGN to load a position.</p><textarea id="pgn-input" spellcheck="false" aria-label="5D Chess PGN" placeholder="Paste your game notation here…"></textarea><div class="dialog-actions"><button class="button quiet" id="copy-pgn">Copy PGN</button><button class="button quiet" id="download-pgn">Download</button><button class="button primary" id="import-pgn">Load game</button></div></dialog>
+    <dialog id="promotion-dialog"><form method="dialog" class="dialog-header"><h2>Choose your move</h2><button class="icon-button" aria-label="Cancel move">×</button></form><p class="dialog-description">More than one move reaches this square.</p><div id="promotion-choices" class="promotion-choices"></div></dialog>
+    <dialog id="help-dialog"><form method="dialog" class="dialog-header"><div><p class="eyebrow">A FEW MORE DIMENSIONS</p><h2>Navigate the multiverse</h2></div><button class="icon-button" aria-label="Close">×</button></form><div class="help-content"><p>Choose a piece on a playable board to highlight its destinations. You can move through space, across timelines, or into a past board. Traveling to the past creates a new branch.</p><p>One turn can contain several moves. Play the required active boards until the present advances to your opponent, then choose <strong>Submit turn</strong>. You may explore intermediate moves that expose a king, but a submitted turn must leave all your kings safe.</p><p>The vertical mint line marks the present. Bright board outlines identify boards with available moves; dimmed timeline labels mark inactive branches. Scroll horizontally to travel through history.</p><p>Run an analysis for a complete recommended turn. <strong>Play best</strong> applies that continuation and submits. Set <strong>Engine plays</strong> to a color for a local game against the engine.</p><p class="help-shortcuts"><kbd>Esc</kbd> Clear selection <kbd>Ctrl</kbd> + <kbd>Enter</kbd> Submit turn</p></div></dialog>
+  </body>
+</html>
