@@ -70,7 +70,7 @@ async function main() {
   const result = await new Promise((resolve, reject) => {
     const deadline = setTimeout(() => {
       void worker.terminate();
-      if (progress) resolve({ ...progress, stopReason: 'hard-time-limit' });
+      if (progress) resolve({ ...progress, stoppedReason: 'hard-time-limit' });
       else reject(new Error('No legal action was found before the hard time limit. Try a longer budget.'));
     }, options.timeMs + 5000);
     worker.on('message', message => {

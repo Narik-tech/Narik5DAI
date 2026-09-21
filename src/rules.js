@@ -7,6 +7,52 @@ const royal = piece => [11, 12, 19, 20].includes(Math.abs(piece));
 const pieceAt = (board, square) => board[square[0]]?.[square[1]]?.[square[2]]?.[square[3]];
 const equalMove = (a, b) => raw.validateFuncs.compareMove(a, b) === 0;
 
+const PIECE_TOKEN = '(?:RQ|CK|[PBNRQKSWCYUD])';
+const SQUARE_TOKEN = '[a-p](?:1[0-6]|[1-9])';
+const BOARD_TOKEN = '\\(L?[+-]?\\d+T[+]?\\d+\\)';
+const MOVE_SUFFIX = '[+#~*!?=]*';
+const SPATIAL_MOVE = new RegExp(`^(?<board>${BOARD_TOKEN})?(?<piece>${PIECE_TOKEN})?(?<source>[a-p]?(?:1[0-6]|[1-9])?)x?(?<end>${SQUARE_TOKEN})(?:=(?<promotion>${PIECE_TOKEN}))?${MOVE_SUFFIX}$`);
+const TEMPORAL_MOVE = new RegExp(`^(?<board>${BOARD_TOKEN})(?<piece>${PIECE_TOKEN})?(?<source>${SQUARE_TOKEN})(?<jump>>{1,2})x?(?<destination>${BOARD_TOKEN})(?<end>${SQUARE_TOKEN})(?:=(?<promotion>${PIECE_TOKEN}))?${MOVE_SUFFIX}$`);
+const CASTLING_MOVE = new RegExp(`^(?<board>${BOARD_TOKEN})?(?<castle>O-O(?:-O)?)${MOVE_SUFFIX}$`);
+const CRITICAL_HEADERS = new Set(['board', 'size', 'mode', 'promotions']);
+
+function stripComments(text) {
+  let clean = '', bracket = false, brace = false, line = false;
+  for (const char of text) {
+    if (line) { if (char === '\n' || char === '\r') { line = false; clean += ' '; } continue; }
+    if (brace) {
+      if (char === '{') throw new Error('Malformed PGN comment.');
+      if (char === '}') { brace = false; clean += ' '; }
+      continue;
+    }
+    if (!bracket && char === ';') { line = true; continue; }
+    if (!bracket && char === '{') { brace = true; continue; }
+    if (!bracket && char === '}') throw new Error('Malformed PGN comment.');
+    if (char === '[') bracket = true;
+    if (char === ']') bracket = false;
+    clean += char;
+  }
+  if (brace) throw new Error('Malformed PGN comment.');
+  return clean;
+}
+
+function readDocument(text) {
+  const headers = [], fens = [], seen = new Set();
+  const body = stripComments(text).replace(/\[[^\[\]]*\]/g, block => {
+    const header = /^\[([A-Za-z][A-Za-z0-9_.-]*)\s+"([^"\r\n]*)"\]$/.exec(block);
+    if (header) {
+      const key = header[1].toLowerCase();
+      if (CRITICAL_HEADERS.has(key) && seen.has(key)) throw new Error(`Duplicate ${header[1]} header.`);
+      seen.add(key);
+      headers.push({ key, value: header[2], text: block });
+    } else if (/^\[[^\]\r\n"]+:[^:\]]+:[^:\]]+:[^:\]]+\]$/.test(block)) fens.push(block);
+    else throw new Error('Malformed PGN header or FEN board.');
+    return ' ';
+  }).trim();
+  if (/[\[\]]/.test(body)) throw new Error('Malformed PGN header or FEN board.');
+  return { headers, fens, body };
+}
+
 /** Guard the upstream parser's sparse-array allocations before parsing input. */
 export function normalizePGN(pgn, variant = 'standard') {
   if (typeof pgn !== 'string') throw new Error('PGN must be a string.');
@@ -14,10 +60,13 @@ export function normalizePGN(pgn, variant = 'standard') {
   const variants = raw.metadataFuncs.variantDict;
   const variantName = value => variants.find(([name, key]) => name.toLowerCase() === value.toLowerCase() || key === value.toLowerCase());
   if (typeof variant !== 'string' || !variantName(variant)) throw new Error('Unknown starting variant.');
-  const metadata = raw.metadataFuncs.strToObj(pgn);
-  if (metadata.mode !== undefined && String(metadata.mode).toLowerCase() !== '5d') throw new Error('Only 5D mode is supported.');
-  const boardHeader = pgn.match(/\[board\s+"([^"]*)"\]/i);
-  if (boardHeader && !variantName(boardHeader[1])) throw new Error('Unknown Board header.');
+  const document = readDocument(pgn);
+  const header = name => document.headers.find(item => item.key === name);
+  if (header('mode') && header('mode').value.toLowerCase() !== '5d') throw new Error('Only 5D mode is supported.');
+  const boardHeader = header('board');
+  if (boardHeader && !variantName(boardHeader.value)) throw new Error('Unknown Board header.');
+  if (document.fens.length && boardHeader && variantName(boardHeader.value)[1] !== 'custom') throw new Error('FEN boards require the Custom variant.');
+  if (header('promotions') && !header('promotions').value.split(',').every(value => new RegExp(`^${PIECE_TOKEN}$`).test(value))) throw new Error('Invalid Promotions header.');
   for (const match of pgn.matchAll(/\[size\s+"([^"]*)"\]/gi)) {
     const size = /^(\d+)x(\d+)$/.exec(match[1]);
     if (!size || size.slice(1).some(value => +value < 1 || +value > 16)) throw new Error('Board dimensions must be between 1 and 16.');
@@ -27,15 +76,21 @@ export function normalizePGN(pgn, variant = 'standard') {
       throw new Error('Import coordinates exceed the supported limits: timeline ±64, turn 0–2048.');
     }
   };
-  for (const match of pgn.matchAll(/\(([+-]?\d+)T(\d+)\)/gi)) checkCoordinate(match[1], match[2]);
+  for (const match of pgn.matchAll(/\(L?([+-]?\d+)T[+]?(\d+)\)/g)) checkCoordinate(match[1], match[2]);
+  const fenCoordinates = new Set();
   for (const match of pgn.matchAll(/\[([^\]\r\n"]*):([^:\]]*):([^:\]]*):([^:\]]*)\]/g)) {
     checkCoordinate(match[2], match[3]);
     if (!['w', 'b'].includes(match[4])) throw new Error('Invalid FEN board player.');
+    const coordinate = `${match[2]}:${match[3]}:${match[4]}`;
+    if (fenCoordinates.has(coordinate)) throw new Error('Duplicate FEN board coordinate.');
+    fenCoordinates.add(coordinate);
     for (const run of match[1].matchAll(/\d+/g)) {
       if (+run[0] < 1 || +run[0] > 16) throw new Error('FEN empty-square runs must be between 1 and 16.');
     }
   }
-  return boardHeader ? pgn : `[Board "${variantName(variant)[0]}"]\n${pgn}`;
+  if (pgn.trim() && !document.headers.length && !document.fens.length && !document.body) throw new Error('PGN contains no game or position.');
+  const prefix = boardHeader ? [] : [`[Board "${document.fens.length ? 'Custom' : variantName(variant)[0]}"]`];
+  return [...prefix, ...document.headers.map(item => item.text), ...document.fens, document.body].filter(Boolean).join('\n');
 }
 
 function assertUsableBoard(board) {
@@ -58,31 +113,92 @@ function assertUsableBoard(board) {
   if (!hasBoard || !kings.every(Boolean)) throw new Error('A position must contain a board and at least one royal piece of each color.');
 }
 
-export function createPosition({ variant = 'standard', pgn } = {}) {
-  // Validate a selected variant even when there is no imported game.
+export function createValidatedGame({ variant = 'standard', pgn } = {}) {
   const normalized = normalizePGN(pgn ?? '', variant);
-  const game = new Chess(undefined, variant);
-  if (pgn?.trim()) {
-    // Detection is performed below, without upstream's costly mate getters.
-    game.skipDetection = true;
-    game.import(normalized, variant, true);
-    assertUsableBoard(game.rawBoardHistory[0]);
-    if (game.rawMoveBuffer.length) throw new Error('PGN ends with an incomplete or illegal turn. Import fully submitted turns.');
-    let position = {
-      board: game.rawBoardHistory[0],
-      action: game.rawStartingAction,
-      promotions: game.rawPromotionPieces.slice(),
-    };
-    for (const moves of game.rawActionHistory) position = validateAction(position, moves);
-    return position;
+  const document = readDocument(normalized);
+  const metadata = raw.metadataFuncs.strToObj(normalized);
+  const game = new Chess(undefined, metadata.board);
+  game.skipDetection = true;
+  Object.assign(game.metadata, metadata);
+  if (metadata.board === 'custom') {
+    if (!document.fens.length) throw new Error('Custom positions require FEN boards with royal pieces of both colors.');
+    game.fen(normalized);
   }
-  return { board: game.rawBoard, action: game.rawAction, promotions: game.rawPromotionPieces.slice() };
+  assertUsableBoard(game.rawBoard);
+  const frontier = raw.boardFuncs.active(game.rawBoard).map(line => game.rawBoard[line].length - 1);
+  if (!frontier.length) throw new Error('The position has no active frontier.');
+  game.rawAction = Math.min(...frontier) % 2;
+  game.rawStartingAction = game.rawAction;
+  game.rawBoardHistory = [raw.boardFuncs.copy(game.rawBoard)];
+  game.rawPromotionPieces = metadata.promotions
+    ? metadata.promotions.split(',').flatMap(piece => [raw.pieceFuncs.fromChar(piece, 0), raw.pieceFuncs.fromChar(piece, 1)])
+    : raw.pieceFuncs.availablePromotionPieces(game.rawBoard);
+  let position = { board: game.rawBoard, action: game.rawAction, promotions: game.rawPromotionPieces.slice() };
+  let moves = [], hasMarker = false, finished = false;
+  const commit = () => {
+    if (!moves.length) throw new Error('PGN action is empty.');
+    if (!canSubmit(position)) throw new Error('PGN ends with an incomplete or illegal turn. Import fully submitted turns.');
+    position = submitPosition(position);
+    game.rawBoard = position.board;
+    game.rawBoardHistory.push(raw.boardFuncs.copy(position.board));
+    game.rawActionHistory.push(moves);
+    game.rawAction = position.action;
+    moves = [];
+  };
+  let rest = document.body;
+  while (rest.trim()) {
+    rest = rest.trimStart();
+    if (finished) throw new Error('Unexpected text after the game result.');
+    const result = /^(1\/2-1\/2|1-0|0-1|\*)(?=\s|$)/.exec(rest);
+    if (result) {
+      if (moves.length) commit();
+      finished = true;
+      rest = rest.slice(result[0].length);
+      continue;
+    }
+    const marker = /^(\d+)(\.\.\.|\.)/.exec(rest);
+    if (marker || rest[0] === '/') {
+      if (moves.length) { commit(); hasMarker = false; }
+      if (hasMarker) throw new Error('PGN action is empty.');
+      const side = marker ? (marker[2] === '...' ? 1 : 0) : 1;
+      if (side !== position.action % 2 || (marker && +marker[1] !== Math.floor(position.action / 2) + 1)) throw new Error('PGN action number or player does not match the position.');
+      hasMarker = true;
+      rest = rest.slice(marker ? marker[0].length : 1);
+      continue;
+    }
+    const annotation = /^\((?:>L|~T)[+-]?\d+\)/.exec(rest);
+    if (annotation) {
+      if (!moves.length) throw new Error('Annotation must follow a move.');
+      rest = rest.slice(annotation[0].length);
+      continue;
+    }
+    if (!hasMarker) throw new Error('Expected a numbered PGN action or a Black action separator.');
+    const token = /^[^\s/]+/.exec(rest)?.[0];
+    if (!token) throw new Error('Malformed PGN move token.');
+    const move = parseMove(position, token);
+    position = applyMove(position, move);
+    moves.push(move);
+    rest = rest.slice(token.length);
+  }
+  if (moves.length) commit();
+  else if (hasMarker && !finished) throw new Error('PGN action is empty.');
+  game.rawBoard = position.board;
+  game.rawMoveBuffer = [];
+  return { chess: game, position: { ...position, board: raw.boardFuncs.copy(position.board) } };
+}
+
+export function createPosition(options = {}) {
+  return createValidatedGame(options).position;
 }
 
 /** Pseudo-legal individual moves. Royal captures are threats, never played. */
 export function pseudoMoves(position) {
   return raw.boardFuncs.moves(position.board, position.action, false, false, false, position.promotions)
     .filter(move => !royal(pieceAt(position.board, move[1])));
+}
+
+export function isTacticalMove(position, move) {
+  return Boolean(pieceAt(position.board, move[1])) || move.length === 3 || move[1].length > 4;
 }
 
 /** Apply a generated move. Call parseMove first when accepting untrusted input. */
@@ -113,7 +229,9 @@ export function submitPosition(position) {
 
 /** Forced-pass check, for classifying an exhausted turn tree as mate/stalemate. */
 export function inCheck(position) {
-  return raw.mateFuncs.checks(position.board, position.action, true);
+  const board = position.board.map(timeline => timeline?.slice() ?? timeline);
+  raw.mateFuncs.blankAction(board, position.action);
+  return attackedByNextPlayer({ ...position, board });
 }
 
 // History matters: a past royal or empty square can determine a temporal move.
@@ -131,6 +249,61 @@ export function formatAction(position, moves) {
 }
 
 export function parseMove(position, input) {
+  if (typeof input === 'string') {
+    const token = stripComments(input).trim().replace(/(?:\s*\((?:>L|~T)[+-]?\d+\))+$/, '').trim();
+    const match = TEMPORAL_MOVE.exec(token) || CASTLING_MOVE.exec(token) || SPATIAL_MOVE.exec(token);
+    if (!match) {
+      // The upstream exporter occasionally repeats a pawn's source file
+      // (e.g. "bbxc6"). Accept only an exact generated representation of a
+      // legal move; never restore its permissive prefix-only token parser.
+      const exact = pseudoMoves(position).filter(move => [false, true].some(explicitBoard => {
+        const notation = raw.pgnFuncs.fromMove(move, position.board, position.action, '', false, false, explicitBoard);
+        return notation === token;
+      }));
+      if (exact.length === 1) return exact[0];
+      throw new Error('Malformed move notation: unexpected or incomplete token.');
+    }
+    const fields = match.groups;
+    const coordinates = value => {
+      const parts = /^\(L?([+-]?\d+)T[+]?(\d+)\)$/.exec(value);
+      let line = +parts[1];
+      if (Math.abs(line) > 64 || +parts[2] > 2048) throw new Error('Move coordinates exceed supported import limits.');
+      if (raw.boardFuncs.isEvenTimeline(position.board)) {
+        if (parts[1] === '-0') line = -1;
+        else if (parts[1] === '+0') line = 1;
+        else if (line < 0) line--;
+        else if (line > 0) line++;
+      }
+      const timeline = line < 0 ? -line * 2 - 1 : line * 2;
+      const turn = (+parts[2] - 1) * 2 + position.action % 2 + (raw.boardFuncs.isTurnZero(position.board) ? 2 : 0);
+      return [timeline, turn];
+    };
+    let startBoard;
+    if (fields.board) startBoard = coordinates(fields.board);
+    else if (position.board[0]) startBoard = [0, position.board[0].length - 1];
+    else {
+      const sources = position.board.flatMap((line, index) => line && (line.length - 1) % 2 === position.action % 2 ? [[index, line.length - 1]] : []);
+      if (sources.length !== 1) throw new Error('Specify the source timeline and turn.');
+      startBoard = sources[0];
+    }
+    const destination = fields.destination ? coordinates(fields.destination) : startBoard;
+    const expectedPiece = raw.pieceFuncs.fromChar(fields.piece || (fields.castle ? 'K' : 'P'), position.action);
+    const squareMatches = (square, text) => {
+      if (!text) return true;
+      const coordinate = /^([a-p]?)(\d*)$/.exec(text);
+      return (!coordinate[1] || square[3] === coordinate[1].charCodeAt(0) - 97) && (!coordinate[2] || square[2] === +coordinate[2] - 1);
+    };
+    const candidates = pseudoMoves(position).filter(move => {
+      if (move[0][0] !== startBoard[0] || move[0][1] !== startBoard[1] || move[1][0] !== destination[0] || move[1][1] !== destination[1]) return false;
+      if (Math.abs(pieceAt(position.board, move[0])) !== expectedPiece) return false;
+      if (fields.castle) return move.length === 4 && (fields.castle === 'O-O' ? move[1][3] > move[0][3] : move[1][3] < move[0][3]);
+      if (!squareMatches(move[0], fields.source) || !squareMatches(move[1], fields.end)) return false;
+      if (fields.promotion) return move[1][4] === raw.pieceFuncs.fromChar(fields.promotion, position.action);
+      return move[1].length < 5;
+    });
+    if (candidates.length !== 1) throw new Error(candidates.length ? 'Ambiguous move: specify the source square.' : 'Illegal piece move in this position.');
+    return candidates[0];
+  }
   const move = raw.convertFuncs.move(input, position.board, position.action, position.promotions);
   const generated = pseudoMoves(position).find(candidate => equalMove(candidate, move));
   if (!generated) throw new Error('Illegal piece move in this position.');
@@ -150,22 +323,41 @@ export function validateAction(position, moves) {
  * expose a king temporarily; only the resulting submitted action must be safe.
  * Each move consumes at least one playable latest board, so a turn is finite.
  */
-export function* generateActions(position, { tick = () => {}, orderMoves = (_position, moves) => moves } = {}) {
+export function* generateActions(position, { tick = () => {}, orderMoves = (_position, moves) => moves, pruneUnsafe = true, tacticalOnly = false, cacheMoves = true } = {}) {
   const visited = new Set();
   const path = [];
-  function* visit(current) {
+  let initialMoves;
+  function* visit(current, hasTacticalMove = false) {
     tick();
-    const key = positionKey(current);
+    const key = (tacticalOnly && hasTacticalMove ? 't:' : '') + positionKey(current);
     if (visited.has(key)) return;
     visited.add(key);
-    if (canSubmit(current)) {
+    // Moves in this action originate and land on mover-color boards. An attack
+    // from an opponent-color latest board onto an opponent-color royal square
+    // therefore survives every remaining move: its source, target and entire
+    // ray are immutable. Reject that dead subtree immediately. This is NOT the
+    // phantom forced-pass check, which other component moves can still resolve.
+    const unsafe = attackedByNextPlayer(current);
+    if (pruneUnsafe && unsafe) return;
+    if ((!tacticalOnly || hasTacticalMove) && !unsafe && raw.boardFuncs.present(current.board, current.action).length === 0) {
       yield { moves: path.slice(), position: { ...current, action: current.action + 1 } };
     }
-    const moves = orderMoves(current, pseudoMoves(current));
-    for (const move of moves) {
+    // Every move consumes existing mover-color sources and creates only
+    // opponent-color boards. Geometry, unmoved flags, and en-passant history
+    // on every remaining source therefore stay fixed throughout this action.
+    // A destination becoming historical changes branching, not its geometry.
+    const moves = cacheMoves
+      ? (initialMoves ??= pseudoMoves(position)).filter(move => current.board[move[0][0]].length - 1 === move[0][1])
+      : pseudoMoves(current);
+    // No mover-color board is added or changed within an action. Remaining
+    // source pieces and capture targets are unchanged; consuming other sources
+    // cannot create a capture or promotion that is absent from this move set.
+    // This skips purely quiet combinations only in capture quiescence.
+    if (tacticalOnly && !hasTacticalMove && !moves.some(move => isTacticalMove(current, move))) return;
+    for (const move of orderMoves(current, moves)) {
       tick();
       path.push(move);
-      yield* visit(applyMove(current, move));
+      yield* visit(applyMove(current, move), tacticalOnly && (hasTacticalMove || isTacticalMove(current, move)));
       path.pop();
     }
   }

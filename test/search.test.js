@@ -155,3 +155,18 @@ test('wall-clock cancellation returns promptly with a legal fallback', () => {
   assert(result.bestAction);
   validateAction(position, result.bestAction);
 });
+
+test('locked-king puzzle completes depth three within a bounded work budget', () => {
+  const position = createPosition({ pgn: '[Board "Custom"]\n[k7/pn6/K7/8/8/8/6PB/8:0:1:w]' });
+  const original = positionKey(position);
+  const result = analyze(position, { timeMs: 5000, maxDepth: 3, maxNodes: 20000, quiescenceDepth: 2 });
+  assert.equal(result.depth, 3);
+  assert.equal(result.effectiveQuiescenceDepth, 2);
+  assert.equal(result.stoppedReason, 'depth');
+  assert.equal(result.completed, true);
+  assert(result.nodes < 20000);
+  assert.match(formatAction(position, result.bestAction), /Bg1/);
+  assert(result.selectiveDepth >= result.depth);
+  assert.equal(positionKey(position), original);
+  validatePv(position, result);
+});

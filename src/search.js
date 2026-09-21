@@ -46,15 +46,21 @@ export function analyze(position, options = {}) {
   let interruption = null, depth = 0, bestAction = null, pv = [], score = null;
   let completed = false, status = 'incomplete', rootPartial = null;
   let activeQDepth = 0, completedQDepth = 0;
+  let searchingDepth = 0, rootActionsSearched = 0, selectiveDepth = 0, lastProgress = started;
   const rootSign = colorSign(position);
 
   function tick(kind = 'generation') {
     if (options.shouldStop?.()) { interruption = 'cancelled'; throw new SearchInterrupted(); }
     if (nodes >= maxNodes) { interruption = 'nodes'; throw new SearchInterrupted(); }
-    if (performance.now() >= deadline) { interruption = 'time'; throw new SearchInterrupted(); }
+    const now = performance.now();
+    if (now >= deadline) { interruption = 'time'; throw new SearchInterrupted(); }
     nodes++;
     if (kind === 'generation') generationNodes++;
     else { searchNodes++; if (kind === 'quiescence') qnodes++; }
+    if (options.onProgress && bestAction !== null && now - lastProgress >= 250) {
+      lastProgress = now;
+      options.onProgress(snapshot());
+    }
   }
   function staticScore(pos) {
     if (!evalCache.has(pos)) evalCache.set(pos, Math.max(-MATE_THRESHOLD + 1, Math.min(MATE_THRESHOLD - 1, evaluate(pos) * colorSign(pos))));
@@ -64,7 +70,7 @@ export function analyze(position, options = {}) {
     if (!checkCache.has(pos)) checkCache.set(pos, inCheck(pos));
     return checkCache.get(pos);
   }
-  function orderMoves(pos, moves, preferred, ply) {
+  function orderMoves(pos, moves, preferred, ply, spatialFirst = false) {
     const favorites = new Set((preferred || []).map(moveKey));
     const killerMoves = new Set((killers.get(ply) || []).flat().map(moveKey));
     return moves.map((move, index) => {
@@ -76,12 +82,15 @@ export function analyze(position, options = {}) {
       else priority += (killerMoves.has(key) ? 100_000 : 0) + (history.get(key) || 0) + centralGain * 10;
       // Unforced early branching expands the reply tree enormously. Explore
       // ordinary development before speculative travel unless it wins material.
-      if (f.temporal) priority -= 100;
+      if (f.temporal) priority -= spatialFirst ? 2_000_000 : 100;
       return { move, priority, index };
     }).sort((a, b) => b.priority - a.priority || a.index - b.index).map(item => item.move);
   }
-  function actions(pos, preferred, ply) {
-    return generateActions(pos, { tick: () => tick(), orderMoves: (current, moves) => orderMoves(current, moves, preferred, ply) });
+  function actions(pos, preferred, ply, { spatialFirst = true, tacticalOnly = false } = {}) {
+    return generateActions(pos, {
+      tick: () => tick(), tacticalOnly,
+      orderMoves: (current, moves) => orderMoves(current, moves, preferred, ply, spatialFirst),
+    });
   }
   function rememberCutoff(pos, action, ply, remaining) {
     cutoffs++;
@@ -103,9 +112,10 @@ export function analyze(position, options = {}) {
   function terminal(pos, ply) { return checked(pos) ? -MATE_SCORE + ply : 0; }
 
   function quiescence(pos, alpha, beta, remaining, ply) {
+    selectiveDepth = Math.max(selectiveDepth, ply);
     tick('quiescence');
     const isCheck = checked(pos);
-    const iterator = actions(pos, null, ply);
+    let iterator = actions(pos, null, ply, { spatialFirst: true });
     const first = iterator.next();
     // Prove at least one legal action before using stand-pat: otherwise a
     // stalemate or mate at the horizon could be mistaken for material gain.
@@ -116,30 +126,37 @@ export function analyze(position, options = {}) {
       alpha = Math.max(alpha, best);
     }
     let next = first;
+    if (!isCheck) {
+      // The witness above proves this is not mate/stalemate. Now enumerate
+      // only complete actions containing a capture or promotion, rather than
+      // constructing every combination of quiet moves and discarding it.
+      iterator.return?.();
+      iterator = actions(pos, null, ply, { tacticalOnly: true });
+      next = iterator.next();
+    }
     while (!next.done) {
       const candidate = next.value;
-      const noisy = isCheck || candidate.moves.some(move => {
-        const f = moveFeatures(pos, move);
-        return f.captureValue || f.promotion;
-      });
-      if (noisy) {
-        // Bound checking sequences without ever standing pat in check. At the
-        // emergency horizon evaluate actual legal evasions instead.
-        const child = remaining <= -4
-          ? { score: staticScore(candidate.position), pv: [] }
-          : quiescence(candidate.position, -beta, -alpha, remaining - 1, ply + 1);
-        const value = -child.score;
-        if (value > best) { best = value; bestPv = [candidate.moves, ...child.pv]; }
-        alpha = Math.max(alpha, value);
-        if (alpha >= beta) { cutoffs++; iterator.return?.(); break; }
-      }
+      selectiveDepth = Math.max(selectiveDepth, ply + 1);
+      // A checked horizon searches actual legal evasions, never stand-pat.
+      // Stop after that evasion at the configured boundary: extending four
+      // further checked turns can explode the number of boards in 5D chess
+      // and consume the entire budget before normal-depth search advances.
+      const child = remaining <= 0
+        ? { score: staticScore(candidate.position), pv: [] }
+        : quiescence(candidate.position, -beta, -alpha, remaining - 1, ply + 1);
+      const value = -child.score;
+      if (value > best) { best = value; bestPv = [candidate.moves, ...child.pv]; }
+      alpha = Math.max(alpha, value);
+      if (alpha >= beta) { cutoffs++; iterator.return?.(); break; }
       next = iterator.next();
     }
     return { score: best, pv: bestPv };
   }
 
   function negamax(pos, remaining, alpha, beta, ply, preferred = null) {
+    selectiveDepth = Math.max(selectiveDepth, ply);
     if (remaining <= 0) return quiescence(pos, alpha, beta, activeQDepth, ply);
+    if (ply === 0) rootActionsSearched = 0;
     tick('search');
     const key = positionKey(pos), entry = tt.get(key);
     if (entry && entry.depth >= remaining && entry.quiescenceDepth >= activeQDepth && ply > 0) {
@@ -163,6 +180,7 @@ export function analyze(position, options = {}) {
         if (probe > alpha && probe < beta) child = negamax(candidate.position, remaining - 1, -beta, -alpha, ply + 1);
       }
       count++;
+      if (ply === 0) rootActionsSearched = count;
       const value = -child.score;
       if (value > best) {
         best = value; bestMove = candidate.moves; bestPv = [candidate.moves, ...child.pv];
@@ -182,6 +200,7 @@ export function analyze(position, options = {}) {
     return {
       bestAction, score: score === null ? null : Math.round(score * rootSign), depth,
       nodes, searchNodes, generationNodes, qnodes, ttHits, cutoffs, elapsedMs: Math.round(elapsedMs),
+      searchingDepth, rootActionsSearched, selectiveDepth,
       nps: elapsedMs ? Math.round(nodes * 1000 / elapsedMs) : 0, pv, status, completed,
       stoppedReason: interruption, tableEntries: tt.size,
       effectiveQuiescenceDepth: completed ? completedQDepth : activeQDepth,
@@ -211,6 +230,7 @@ export function analyze(position, options = {}) {
     for (let currentDepth = 1; currentDepth <= maxDepth; currentDepth++) iterations.push({ depth: currentDepth, horizon: qDepth });
     for (const iteration of iterations) {
       const currentDepth = iteration.depth;
+      searchingDepth = currentDepth;
       activeQDepth = iteration.horizon;
       rootPartial = null;
       const window = currentDepth > 2 && Math.abs(score ?? 0) < MATE_THRESHOLD ? 60 : INF;
@@ -221,6 +241,7 @@ export function analyze(position, options = {}) {
       score = result.score; depth = currentDepth; pv = result.pv; bestAction = pv[0] || bestAction;
       completedQDepth = activeQDepth;
       completed = true; status = 'ok';
+      lastProgress = performance.now();
       options.onProgress?.(snapshot());
       if (Math.abs(score) >= MATE_SCORE - currentDepth) { interruption = 'mate'; break; }
     }

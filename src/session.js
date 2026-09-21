@@ -1,7 +1,6 @@
-import Chess from '5d-chess-js';
 import {
-  createPosition, pseudoMoves, applyMove, parseMove, formatMove, formatAction,
-  canSubmit, submitPosition, inCheck, raw, validateAction, normalizePGN,
+  pseudoMoves, applyMove, parseMove, formatMove, formatAction,
+  canSubmit, submitPosition, inCheck, raw, validateAction, createValidatedGame,
 } from './rules.js';
 
 /** A local game with transactional edits and separate partial/committed turns. */
@@ -12,11 +11,7 @@ export class GameSession {
   }
 
   reset({ variant = 'standard', pgn } = {}) {
-    const position = createPosition({ variant, pgn });
-    const chess = new Chess();
-    chess.skipDetection = true;
-    if (pgn?.trim()) chess.import(normalizePGN(pgn, variant), variant, true);
-    else chess.reset(variant);
+    const { position, chess } = createValidatedGame({ variant, pgn });
     this.position = position;
     this.chess = chess;
     this.pending = [];

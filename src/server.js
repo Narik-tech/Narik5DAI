@@ -139,7 +139,7 @@ export function createApp() {
           // Guard non-interruptible upstream move generation as well as our cooperative timer.
           const hardDeadline = setTimeout(() => {
             if (job.status !== 'running') return;
-            job.result = job.progress;
+            job.result = job.progress ? { ...job.progress, stoppedReason: 'hard-time-limit' } : undefined;
             job.status = job.result?.bestAction ? 'done' : 'cancelled';
             job.error = 'Hard time limit reached; showing the last completed search result.';
             void worker.terminate();

@@ -258,11 +258,11 @@ function renderAnalysis() {
   $('eval-label').textContent = Number.isFinite(score) ? result?.status === 'checkmate' ? `${sideLabel()} is checkmated` : result?.status === 'stalemate' ? 'Stalemate' : isMate ? `${score >= 0 ? 'White' : 'Black'} has a mating line` : Math.abs(score) < 20 ? 'Approximately equal' : `${score > 0 ? 'White' : 'Black'} is favored` : running ? 'Exploring possible continuations…' : search?.result ? 'Evaluation unavailable' : 'Run an analysis to evaluate';
   $('evaluation-fill').style.height = `${Number.isFinite(score) ? 50 + 47 * Math.tanh(score / 600) : 50}%`;
   $('stat-depth').textContent = result?.depth ?? '—';
-  $('stat-depth').title = result ? `Completed full-turn depth: ${result.depth ?? 0}. Capture extension depth: ${result.effectiveQuiescenceDepth ?? 0}.` : 'Deepest fully completed full-turn search';
+  $('stat-depth').title = result ? `Completed full-turn depth: ${result.depth ?? 0}. Deepest visited turn: ${result.selectiveDepth ?? result.depth ?? 0}. Capture extension depth: ${result.effectiveQuiescenceDepth ?? 0}.` : 'Deepest fully completed full-turn search';
   $('stat-nodes').textContent = compactNumber(result?.nodes);
   $('stat-nps').textContent = compactNumber(result?.nps);
   $('stat-time').textContent = Number.isFinite(result?.elapsedMs) ? `${(result.elapsedMs / 1000).toFixed(1)}s` : '—';
-  const note = !running && search?.result && !result.completed ? Number.isFinite(score) ? 'Partial search; no full depth completed. Allow more think time for a deeper comparison.' : 'A legal fallback is available. Allow more think time to evaluate alternatives.' : '';
+  const note = running && result ? `Searching depth ${result.searchingDepth ?? result.depth} · ${result.rootActionsSearched ?? 0} root turns compared` : !running && search?.result && !result.completed ? Number.isFinite(score) ? 'Partial search; no full depth completed. Allow more think time for a deeper comparison.' : 'A legal fallback is available. Allow more think time to evaluate alternatives.' : '';
   $('analysis-note').textContent = note;
   $('analysis-note').hidden = !note;
   const bestNotation = notation(result?.notation) || (Array.isArray(result?.bestAction) ? result.bestAction.length ? result.bestAction.map(raw => readableMove({raw})).join(' / ') : 'Submit the current turn' : '');

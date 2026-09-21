@@ -1,5 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import { GameSession } from '../src/session.js';
 import {
   raw, createPosition, pseudoMoves, applyMove, canSubmit, submitPosition,
   inCheck, positionKey, formatMove, formatAction, parseMove, validateAction, generateActions,
@@ -182,4 +183,90 @@ test('import bounds reject expensive sparse allocations before the upstream pars
   assert.throws(() => normalizePGN('[999999999/8/8/8/8/8/8/8:0:1:w]'), /empty-square/);
   assert.throws(() => normalizePGN('[Size "9999999x8"]'), /dimensions/);
   assert.throws(() => normalizePGN('[Mode "2D"]'), /5D/);
+});
+
+test('missing custom setup rejects and bare FEN selects Custom instead of standard', () => {
+  assert.throws(() => createPosition({ variant: 'custom' }), /require FEN/);
+  assert.throws(() => createPosition({ variant: 'custom', pgn: '' }), /require FEN/);
+  const game = new GameSession({ pgn: '[Size "4x4"]\n[3k/4/4/K3:0:1:w]' });
+  assert.equal(game.position.board[0][0].length, 4);
+  assert.equal(game.chess.metadata.board, 'custom');
+  assert.equal(pseudoMoves(game.position).length, 3);
+  assert.throws(() => createPosition({ pgn: '[Board "Standard"]\n[Size "4x4"]\n[3k/4/4/K3:0:1:w]' }), /Custom/);
+});
+
+test('Black custom frontier without timeline zero stays synchronized through play and export', () => {
+  const game = new GameSession({ pgn: '[Board "Custom"]\n[Size "4x4"]\n[3k/4/4/K3:1:1:b]' });
+  assert.equal(game.position.action, 1);
+  assert.equal(game.chess.rawStartingAction, 1);
+  assert.equal(game.chess.player, 'black');
+  const move = pseudoMoves(game.position)[0];
+  game.play([move]);
+  assert.equal(positionKey(createPosition({ pgn: game.chess.export() })), positionKey(game.position));
+  assert.equal(game.chess.rawAction, game.position.action);
+  const whiteAction = '[Board "Custom"]\n[Size "4x4"]\n[3k/4/4/K3:1:1:b]\n1. (+0T0)Kc4';
+  assert.throws(() => createPosition({ pgn: whiteAction }), /player/);
+});
+
+test('discarded PGN text, duplicate critical headers, and move suffix junk are rejected', () => {
+  for (const pgn of [
+    '{}', '[not valid]', '1. e4oops', '50. e4',
+    '[Board "Standard"]\n[Board "Bogus"]\n1. e4',
+    '[Size "8x8"]\n[size "8x8"]',
+    '[Mode "5D"]\n[mode "5D"]',
+    '[Promotions "Q"]\n[Promotions "N"]',
+    '1. e4 /', '1. e4 / / e5', '1. e4 1-0 unexpected',
+  ]) assert.throws(() => createPosition({ pgn }), undefined, pgn);
+  const game = new GameSession();
+  const key = positionKey(game.position), revision = game.revision;
+  for (const token of ['e4oops', 'e(>L1)4', 'e4 e5', 'Qe2e4', 'e4junk!']) assert.throws(() => game.move(token));
+  assert.equal(positionKey(game.position), key);
+  assert.equal(game.revision, revision);
+});
+
+test('comments, result markers, temporal annotations and strict notation roundtrip', () => {
+  const game = new GameSession({ pgn: '[Event "Roundtrip; annotated"]\n1. Nf3! {development} / Nf6\n2. Nc3 / Nc6 ; end comment' });
+  const move = parseMove(game.position, '(0T3)Nc3>>(0T2)c5~ (>L1)');
+  game.play([move]);
+  const exported = game.chess.export('5dpgn_timeline');
+  assert.match(exported, />L1/);
+  assert.equal(positionKey(createPosition({ pgn: `${exported}\n*` })), positionKey(game.position));
+});
+
+test('upstream duplicate-file Black pawn capture notation imports only as an exact legal export', () => {
+  const game = new GameSession({ pgn: '[Board "Custom"]\n[7k/8/8/8/4p1p1/5N2/8/K7:0:1:b]' });
+  const move = pseudoMoves(game.position).find(candidate => candidate[0][3] === 4 && candidate[1][2] === 2 && candidate[1][3] === 5);
+  assert(move);
+  game.play([move]);
+  const exported = game.chess.export();
+  assert.match(exported, /eexf3/);
+  assert.equal(positionKey(createPosition({ pgn: exported })), positionKey(game.position));
+  assert.throws(() => createPosition({ pgn: exported.replace('eexf3', 'eexf3oops') }));
+});
+
+test('validated session board containers do not alias committed temporal history or undo state', () => {
+  const game = new GameSession({ pgn: '1. Nf3 / Nf6 2. Nc3 / Nc6' });
+  const start = game.position, key = positionKey(start);
+  assert.notEqual(game.position.board, game.chess.rawBoard);
+  assert.notEqual(game.position.board[0], game.chess.rawBoard[0]);
+  game.move('(0T3)Nc3>>(0T2)c5');
+  assert.equal(positionKey(start), key);
+  game.submit();
+  assert.equal(positionKey(start), key);
+  assert.equal(positionKey(createPosition({ pgn: game.chess.export() })), positionKey(game.position));
+  game.undo();
+  assert.equal(positionKey(game.position), key);
+  assert.deepEqual(game.chess.rawBoard, game.position.board);
+});
+
+test('twenty submitted selfplay actions preserve full historical state through PGN roundtrip', () => {
+  const game = new GameSession();
+  for (let turn = 0; turn < 20; turn++) {
+    const iterator = generateActions(game.position);
+    const candidate = iterator.next();
+    iterator.return();
+    assert.equal(candidate.done, false);
+    game.play(candidate.value.moves);
+    assert.equal(positionKey(createPosition({ pgn: game.chess.export() })), positionKey(game.position));
+  }
 });

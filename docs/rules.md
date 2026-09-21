@@ -16,6 +16,10 @@ Submission requires that the present has passed to the opponent and that no oppo
 
 Checkmate or stalemate is established only by exhausting the legal action tree. A stopped search is not evidence of either. The check used to distinguish these terminal states is the library's forced-pass check; it is separate from checking actual opponent captures at submission.
 
+Action generation prunes a partial turn when an actual opponent move can already capture a royal piece. This attack cannot be repaired by the remaining component moves: existing opponent-color boards, including the attack's source, target, and ray, remain immutable throughout the turn. Forced-pass (phantom) checks are treated differently and are still allowed between component moves. The source geometry can also be cached for a whole action because moves consume mover-color latest boards and add only opponent-color boards. Tests compare these optimizations against exhaustive generation, including arrivals that turn a formerly latest destination into history.
+
+During nonchecked capture quiescence, the engine separately proves that at least one legal turn exists, then generates only turns containing a capture or promotion. It skips a quiet partial path when no remaining source has a capture or promotion: the remaining mover-color snapshots cannot change to create one. This filtering is not applied to normal-depth search or check evasions.
+
 Quiescence search is a finite tactical extension, not a proof that a position is tactically quiet. At its emergency check-sequence limit it evaluates a legal evasion instead of continuing indefinitely; tactics beyond that horizon may be missed. Heuristic evaluation is kept outside the search's reserved mate-score range.
 
 ## Primary sources consulted
@@ -32,13 +36,15 @@ The released 1.2.1 bundle and upstream source were inspected directly. Narik doe
 
 - In [action.js](https://gitlab.com/5d-chess/5d-chess-js/-/blob/master/src/action.js), the promotion argument is passed in the `spatialOnly` parameter slot. Its defaults also omit optional inactive or future-board moves. It materializes the full action tree before returning results.
 - In [mate.js](https://gitlab.com/5d-chess/5d-chess-js/-/blob/master/src/mate.js), a timeout returns `[true, true]`; the high-level getters in [index.js](https://gitlab.com/5d-chess/5d-chess-js/-/blob/master/src/index.js) expose the first component as a positive mate/stalemate result. The slow checkmate traversal also passes a node wrapper where a board array is expected.
-- High-level imports reset to standard when no Board header is supplied. Narik normalizes a missing Board header using the selected variant, validates all imported moves again, and rejects incomplete final turns.
+- High-level imports reset to standard when no Board header is supplied and can discard malformed token suffixes. Narik parses complete action and move tokens, matches moves against generated legal geometry, and rejects incomplete final turns. It preserves the selected variant when a Board header is absent, or infers Custom when FEN boards are present.
 
 These are targeted replacements, not a proof that every upstream variant or unusual position matches the commercial game. The tests cover temporal branching, all four movement axes, full-turn check resolution, optional/inactive-board moves, exact-state deduplication, castling, promotion, en passant, and a known temporal checkmate.
 
 ## Import boundaries
 
-Import accepts fully submitted 5DPGN games and custom 5DFEN positions with a board and at least one royal piece of each color. Custom positions are analysis setups; the importer does not prove they are reachable from an official starting position. Empty PGN input at the HTTP import endpoint is rejected. `createPosition()` without a game creates the selected initial position.
+Import accepts fully submitted 5DPGN games and custom 5DFEN positions with a board and at least one royal piece of each color. Custom positions are analysis setups; the importer does not prove they are reachable from an official starting position. Empty PGN input at the HTTP import endpoint is rejected. `createPosition()` without a game creates the selected built-in initial position; Custom requires FEN setup boards.
+
+The mover is inferred from the earliest active frontier, including positions without timeline zero. Imported action numbers and player separators must agree with that mover. Malformed headers, duplicate Board/Size/Mode/Promotions headers, inconsistent FEN/variant combinations, and unconsumed move text are rejected before the live session changes. Brace and semicolon comments, result markers, ordinary move annotations, and exported temporal coordinate/branch tokens are supported. An upstream duplicated-file pawn capture such as `eexf3` is accepted only when it exactly matches a generated legal move's export. Session state and the notation exporter keep independent board containers so play and undo preserve historical positions.
 
 To prevent malformed input from causing enormous sparse allocations inside the upstream parser, import rejects text over 500,000 characters, boards over 16×16, timeline coordinates outside −64…64, and turn coordinates outside 0…2048. These are explicit input errors; search does not silently discard actions beyond a timeline count or move-list limit. The upstream parser's treatment of special turn-zero and even-timeline custom setups remains a compatibility limitation; verify unusual custom numbering against the exported notation.
 

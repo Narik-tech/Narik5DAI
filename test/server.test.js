@@ -61,3 +61,36 @@ test('local server rejects foreign origins and invalid analysis budgets', async 
   assert.equal((await request('/api/analyze', { timeMs: -1 })).status, 400);
   assert.equal((await request('/api/new', { variant: 'does-not-exist' })).status, 400);
 });
+
+test('stopping a long search returns an interrupted result and preserves the position', async t => {
+  const { request } = await fixture(t);
+  const initial = (await request('/api/game')).data;
+  const created = await request('/api/analyze', { timeMs: 60000, maxDepth: 16 });
+  await request(`/api/analysis/${created.data.jobId}/stop`, {});
+  let job;
+  const deadline = Date.now() + 3000;
+  do {
+    await delay(20);
+    job = (await request(`/api/analysis/${created.data.jobId}`)).data;
+  } while (job.status === 'running' && Date.now() < deadline);
+  assert.equal(job.status, 'done', job.error);
+  assert.equal(job.result.stoppedReason, 'cancelled');
+  assert.notEqual(job.result.status, 'checkmate');
+  const unchanged = (await request('/api/game')).data;
+  assert.equal(unchanged.revision, initial.revision);
+  assert.deepEqual(unchanged.position, initial.position);
+});
+
+test('malformed imports leave the live position intact and bare FEN imports stay custom', async t => {
+  const { request } = await fixture(t);
+  const initial = (await request('/api/game')).data;
+  const invalid = await request('/api/import', { pgn: '1. e4oops' });
+  assert.equal(invalid.status, 400);
+  const unchanged = (await request('/api/game')).data;
+  assert.equal(unchanged.revision, initial.revision);
+  assert.deepEqual(unchanged.position, initial.position);
+  const custom = await request('/api/import', { pgn: '[Size "4x4"]\n[3k/4/4/K3:0:1:w]' });
+  assert.equal(custom.status, 200, custom.data.error);
+  assert.equal(custom.data.position.board[0][0].length, 4);
+  assert.match(custom.data.pgn, /\[Board "Custom"\]/);
+});

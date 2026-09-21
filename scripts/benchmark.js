@@ -9,6 +9,7 @@ const cases = [
   ['two timelines', { variant: 'two_timelines' }],
   ['opening', { pgn: await readFile(new URL('../examples/opening.5dpgn', import.meta.url), 'utf8') }],
   ['temporal attack', { pgn: await readFile(new URL('../examples/time-travel.5dpgn', import.meta.url), 'utf8') }],
+  ['locked king puzzle', { pgn: await readFile(new URL('../examples/locked-king.5dpgn', import.meta.url), 'utf8') }],
 ];
 const results = [];
 for (const [name, setup] of cases) {
