@@ -3,7 +3,7 @@ import { readFile } from 'node:fs/promises';
 import { Worker } from 'node:worker_threads';
 import { GameSession } from './session.js';
 
-const HELP = `Narik 5D AI — full-turn analysis for 5D Chess
+const HELP = `Vibe-D AI — full-turn analysis for 5D Chess
 
 Usage: node src/cli.js [options]
   --file PATH       Load a 5DPGN game or 5DFEN position

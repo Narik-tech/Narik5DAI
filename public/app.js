@@ -343,7 +343,7 @@ $('copy-pgn').addEventListener('click',async () => {
 });
 $('download-pgn').addEventListener('click',() => {
   const url = URL.createObjectURL(new Blob([$('pgn-input').value],{type:'text/plain;charset=utf-8'}));
-  const anchor = document.createElement('a'); anchor.href = url; anchor.download = 'narik-5d-chess.pgn'; anchor.click();
+  const anchor = document.createElement('a'); anchor.href = url; anchor.download = 'vibe-d-ai.pgn'; anchor.click();
   setTimeout(() => URL.revokeObjectURL(url),1000);
 });
 $('import-pgn').addEventListener('click',() => {

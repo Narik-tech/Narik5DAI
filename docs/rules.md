@@ -1,6 +1,6 @@
 # Rules, sources, and compatibility
 
-Narik uses the piece geometry, board-history representation, and notation parser from **5d-chess-js 1.2.1**, with its own legal-action generator and search. This is an independent local analysis tool, not the official game's AI. Playing strength has not been established by an external rating or tournament comparison.
+Vibe-D AI uses the piece geometry, board-history representation, and notation parser from **5d-chess-js 1.2.1**, with its own legal-action generator and search. This is an independent local analysis tool, not the official game's AI. Playing strength has not been established by an external rating or tournament comparison.
 
 ## What a search turn means
 
@@ -32,11 +32,11 @@ Quiescence search is a finite tactical extension, not a proof that a position is
 
 ## Upstream behavior deliberately avoided
 
-The released 1.2.1 bundle and upstream source were inspected directly. Narik does not call the library's eager `actions()` generator or high-level `inCheckmate` / `inStalemate` getters:
+The released 1.2.1 bundle and upstream source were inspected directly. Vibe-D AI does not call the library's eager `actions()` generator or high-level `inCheckmate` / `inStalemate` getters:
 
 - In [action.js](https://gitlab.com/5d-chess/5d-chess-js/-/blob/master/src/action.js), the promotion argument is passed in the `spatialOnly` parameter slot. Its defaults also omit optional inactive or future-board moves. It materializes the full action tree before returning results.
 - In [mate.js](https://gitlab.com/5d-chess/5d-chess-js/-/blob/master/src/mate.js), a timeout returns `[true, true]`; the high-level getters in [index.js](https://gitlab.com/5d-chess/5d-chess-js/-/blob/master/src/index.js) expose the first component as a positive mate/stalemate result. The slow checkmate traversal also passes a node wrapper where a board array is expected.
-- High-level imports reset to standard when no Board header is supplied and can discard malformed token suffixes. Narik parses complete action and move tokens, matches moves against generated legal geometry, and rejects incomplete final turns. It preserves the selected variant when a Board header is absent, or infers Custom when FEN boards are present.
+- High-level imports reset to standard when no Board header is supplied and can discard malformed token suffixes. Vibe-D AI parses complete action and move tokens, matches moves against generated legal geometry, and rejects incomplete final turns. It preserves the selected variant when a Board header is absent, or infers Custom when FEN boards are present.
 
 These are targeted replacements, not a proof that every upstream variant or unusual position matches the commercial game. The tests cover temporal branching, all four movement axes, full-turn check resolution, optional/inactive-board moves, exact-state deduplication, castling, promotion, en passant, and a known temporal checkmate.
 

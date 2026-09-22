@@ -1,4 +1,4 @@
-# Narik 5D AI
+# Vibe-D AI
 
 A local analysis and play workbench, command-line engine, and JavaScript library for **5D Chess with Multiverse Time Travel**.
 
