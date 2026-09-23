@@ -58,7 +58,7 @@ const assert = require('node:assert/strict');
     }
 
     const limited = await analyze();
-    assert.deepEqual(requests.at(-1), { timeMs: 60000, maxDepth: 12, maxNodes: 50, cacheMemoryMb: 16 });
+    assert.deepEqual(requests.at(-1), { engine: 'classical', timeMs: 60000, maxDepth: 12, maxNodes: 50, cacheMemoryMb: 16 });
     assert.equal(limited.limits.maxNodes, 50);
     assert.equal(limited.limits.cacheMemoryMb, 16);
     assert.equal(limited.stoppedReason, 'nodes');
@@ -101,7 +101,7 @@ const assert = require('node:assert/strict');
     await page.waitForFunction(() => !document.getElementById('submit-button').disabled);
     await page.locator('#submit-button').click();
     await page.locator('#history-count').filter({ hasText: '2 turns' }).waitFor({ timeout: 15000 });
-    assert.deepEqual(requests.at(-1), { timeMs: 1000, maxDepth: 2, maxNodes: 700, cacheMemoryMb: 32 }, 'Automatic engine replies must use the chosen resource settings.');
+    assert.deepEqual(requests.at(-1), { engine: 'classical', timeMs: 1000, maxDepth: 2, maxNodes: 700, cacheMemoryMb: 32 }, 'Automatic engine replies must use the chosen resource settings.');
     assert.equal(await page.locator('#turn-label').textContent(), 'White to play');
     assert.deepEqual(errors, []);
     console.log('Resource browser smoke passed: node validation, persisted settings, submitted limits, disabled controls, node-limit result, retained result budgets, cache off, automatic reply, 390px mobile width.');

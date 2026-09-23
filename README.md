@@ -2,9 +2,9 @@
 
 A local analysis and play workbench, command-line engine, and JavaScript library for **5D Chess with Multiverse Time Travel**.
 
-The engine searches **complete submitted turns**, including turns that require moves on several timelines. Ordinary moves are considered only on boards currently required to advance the present; optional boards contribute only cross-board moves. It uses iterative deepening, principal variation alpha-beta search, full-turn move ordering, transposition caching in both normal and tactical search, capture/promotion quiescence, and a multiverse evaluation. The rules layer supports historical travel, branching, inactive timelines, castling, en passant, promotions, and the variant pieces supported by the pinned rules dependency.
+The classical engine searches **complete submitted turns**, including turns that require moves on several timelines. Ordinary moves are considered only on boards currently required to advance the present; optional boards contribute only cross-board moves. It uses iterative deepening, principal variation alpha-beta search, full-turn move ordering, transposition caching in both normal and tactical search, capture/promotion quiescence, and a multiverse evaluation. The shared rules layer supports historical travel, branching, inactive timelines, castling, en passant, promotions, and the variant pieces supported by the pinned rules dependency.
 
-This is a working classical search engine, not a trained neural model. It has **no established Elo or claim to be the world's strongest 5D engine**. The search budget, completed depth, principal variation, and incomplete results are visible so its behavior can be measured and improved.
+The UI offers **Classical search** and a separate, experimental **Transformer** engine with a locally trainable model. Neither engine has an established Elo or a claim to be the world's strongest 5D engine. Search budgets, completed depth, principal variation, and incomplete results are visible so behavior can be measured and improved.
 
 ## Run
 
@@ -15,11 +15,24 @@ npm ci
 npm start
 ```
 
-Open **http://127.0.0.1:5173**. Everything runs on your computer. No API key, cloud service, account, or GPU is required. Set `PORT` to use a different local port.
+Open **http://127.0.0.1:5173**. Everything runs on your computer. No API key, cloud service, or account is required. Classical search runs without a GPU or Python installation. Set `PORT` to use a different local port.
 
-The Engine panel includes **Max nodes** (1–1,000,000,000) and **Search cache (RAM)** (Off or 16 MiB–4 GiB), alongside think time and depth. Settings are saved in your browser and apply to analysis and automatic engine replies. Search stops at the time, node, or depth limit; reaching the node limit is shown below the results. A full cache evicts old entries while search continues.
+Choose the engine in the Engine panel. The selection and resource settings are saved in your browser and apply to analysis and automatic engine replies. Switching engines cancels the current analysis and clears its recommendation. **Max nodes** (1–1,000,000,000), think time, and depth bound search; reaching the node limit is shown below the results. **Search cache (RAM)** (Off or 16 MiB–4 GiB) applies to Classical search, where a full cache evicts old entries while search continues.
 
-This CPU engine does not allocate GPU VRAM. Profiling found rule generation and history handling to dominate runtime; its small, sequential evaluations do not currently provide enough batched work to justify GPU transfers. See [the performance and GPU assessment](docs/performance.md). The cache control caps estimated RAM retained for saved search results, including full position-history keys and move arrays; total process memory is higher. The selected amount is a budget, not an up-front allocation. Results display estimated cache usage against that budget. Choose Off to disable the cache.
+Classical search does not allocate GPU VRAM. Profiling found rule generation and history handling to dominate its runtime; its small, sequential evaluations do not provide enough batched work to justify GPU transfers. See [the classical engine performance and GPU assessment](docs/performance.md). The cache control caps estimated RAM retained for saved search results, including full position-history keys and move arrays; total process memory is higher. The selected amount is a budget, not an up-front allocation. Results display estimated cache usage against that budget. Choose Off to disable the cache.
+
+To prepare the transformer, run these commands from the project folder, then select **Transformer · experimental** and choose **Refresh** in the UI:
+
+```sh
+npm run transformer:setup
+npm run transformer:data
+npm run transformer:train
+npm run transformer:doctor
+```
+
+The transformer uses bounded historical context and candidate turns to keep training and inference manageable on a local GPU, with a CPU option. Full history still determines move legality. Training on a small generated dataset creates a usable experimental checkpoint; it does not establish playing strength. See [transformer architecture, training, GPU settings, and limits](docs/transformer.md) for configuration and validation commands. The UI shows setup guidance until a local runtime and checkpoint are available.
+
+To improve an existing transformer through self-play, run `npm run transformer:selfplay -- --iterations 0 --device cuda` and stop with Ctrl+C. The loop generates legal games, trains on a bounded replay buffer, and promotes a candidate only after passing paired matches against the incumbent. Use `--iterations 1` for one cycle. See [self-play settings, promotion rules, logs and recovery](docs/transformer-selfplay.md).
 
 Select a piece on a playable board, then a highlighted destination on any board. A time-travel move can create a new timeline. Continue until the turn can be submitted, then choose **Submit turn**. **Analyze** recommends an entire remaining turn; **Play best** applies it and submits. The opponent selector enables automatic engine replies. Undo removes one pending move, or a whole submitted turn when no moves are pending.
 
@@ -93,7 +106,8 @@ For longer diagnostics, set `BENCH_TIME_MS`, `SELFPLAY_TIME_MS`, or `SELFPLAY_PL
 - **No false mate from a timer:** mate/stalemate is classified only after exhaustive legal-action enumeration. The upstream eager action enumerator and timeout-based mate getters are bypassed.
 - **Evaluation:** weighted frontier material, development, mobility, pawn structure, king exposure, temporal pressure, and weaknesses across timelines. Temporal pressure follows the pinned movement vectors, including directional pawn/brawn captures and royal and fairy pieces, respects historical blockers and missing boards, and connects only matching half-turn colors. Historical material is not repeatedly counted. Direct royal pressure samples six past snapshots; king-zone protection also retains the first snapshot of each half-turn color. Weights are hand tuned and not statistically calibrated.
 - **Search:** no beam cap or chess null-move assumption in normal-depth search. Ordinary moves on optional boards are deliberately excluded, including captures, promotions, and castling. Quiescence uses the same policy and searches captures/promotions up to its configured limit. If checked at that limit, it evaluates permitted legal evasions for one further turn, including terminal detection after the evasion. An exhausted restricted tree is checked against full rules before classifying mate/stalemate; a policy-limited root returns no recommendation and `stoppedReason: policy`. This selective search and finite horizon can miss tactics. Time budgets can expire before depth one on a large multiverse.
-- **Compatibility:** the pinned community rules implementation is not an official Thunkspace engine. Regression coverage is substantial but cannot certify every Steam variant. There is no live Steam integration, opening book, tablebase, repetition adjudication, learned policy, or distributed search.
+- **Transformer:** a separate experimental engine uses learned evaluation, bounded model context, and selective candidate search. Its context and candidate limits can miss information and tactics; trained strength is unmeasured. See [the transformer guide](docs/transformer.md).
+- **Compatibility:** the pinned community rules implementation is not an official Thunkspace engine. Regression coverage is substantial but cannot certify every Steam variant. There is no live Steam integration, opening book, tablebase, repetition adjudication, or distributed search.
 
 For further strength measurement, expand the tactical suite and run paired engine matches before tuning evaluation weights. More search time is useful, but no finite setting guarantees optimal play.
 

@@ -3,3 +3,6 @@ coverage/
 *.log
 artifacts/
 .DS_Store
+.venv-transformer/
+__pycache__/
+*.pyc

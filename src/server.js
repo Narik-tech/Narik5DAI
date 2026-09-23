@@ -4,6 +4,7 @@ import { fileURLToPath } from 'node:url';
 import { Worker } from 'node:worker_threads';
 import { randomUUID } from 'node:crypto';
 import { GameSession } from './session.js';
+import { TransformerRuntime, listEngines, forwardInference } from './transformer-runtime.js';
 
 const PUBLIC = new URL('../public/', import.meta.url);
 const staticFiles = new Map([
@@ -37,9 +38,10 @@ async function readBody(req) {
   return value;
 }
 
-export function createApp() {
+export function createApp({ transformerRuntime = new TransformerRuntime() } = {}) {
   const game = new GameSession();
   const jobs = new Map();
+  let shuttingDown = false;
   const stopJobs = () => {
     for (const job of jobs.values()) {
       if (job.status === 'running') Atomics.store(job.cancelled, 0, 1);
@@ -74,6 +76,7 @@ export function createApp() {
         return res.end(content);
       }
       if (req.method === 'GET' && url.pathname === '/api/game') return send(res, 200, game.snapshot());
+      if (req.method === 'GET' && url.pathname === '/api/engines') return send(res, 200, listEngines(transformerRuntime));
       const jobMatch = /^\/api\/analysis\/([a-zA-Z0-9-]+)(\/stop)?$/.exec(url.pathname);
       if (jobMatch) {
         const job = jobs.get(jobMatch[1]);
@@ -115,7 +118,10 @@ export function createApp() {
           stopJobs();
           break;
         case '/api/analyze': {
+          const engine = body.engine ?? 'classical';
+          if (!['classical', 'transformer'].includes(engine)) throw new Error('Unknown engine. Choose classical or transformer.');
           const options = {
+            engine,
             timeMs: numericOption(body.timeMs, 3000, 50, 120000, 'Think time'),
             maxDepth: numericOption(body.maxDepth, 8, 1, 16, 'Depth'),
             maxNodes: numericOption(body.maxNodes, 2000000, 1, 1000000000, 'Node budget'),
@@ -123,6 +129,11 @@ export function createApp() {
             maxTableEntries: 1000000,
             quiescenceDepth: numericOption(body.quiescenceDepth, 2, 0, 6, 'Quiescence depth'),
           };
+          const revision = game.revision;
+          const modelInfo = engine === 'transformer' ? await transformerRuntime.start() : null;
+          if (shuttingDown) throw new Error('The local server is shutting down.');
+          if (res.destroyed) return;
+          game.assertRevision(revision);
           stopJobs();
           // A bounded cache retains completed results for Play best and inspection.
           for (const [id, old] of jobs) {
@@ -135,7 +146,7 @@ export function createApp() {
           const cancelled = new Int32Array(new SharedArrayBuffer(4));
           const job = { id: randomUUID(), status: 'running', revision: game.revision, cancelled };
           const worker = new Worker(new URL('./worker.js', import.meta.url), {
-            workerData: { position: game.position, options, cancelBuffer: cancelled.buffer },
+            workerData: { position: game.position, options, model: modelInfo?.model, cancelBuffer: cancelled.buffer },
           });
           job.worker = worker;
           jobs.set(job.id, job);
@@ -147,14 +158,16 @@ export function createApp() {
             job.error = 'Hard time limit reached; showing the last completed search result.';
             void worker.terminate();
           }, options.timeMs + 5000);
+          job.deadline = hardDeadline;
           hardDeadline.unref();
           worker.on('message', message => {
             if (job.status !== 'running') return;
+            if (message.type === 'evaluate') { void forwardInference(worker, transformerRuntime, message); return; }
             if (message.type === 'progress') job.progress = message.result;
             if (message.type === 'result') { job.result = message.result; job.status = 'done'; clearTimeout(hardDeadline); }
             if (message.type === 'error') { job.error = message.error; job.status = 'error'; clearTimeout(hardDeadline); }
           });
-          worker.on('error', error => { job.error = error.message; job.status = 'error'; clearTimeout(hardDeadline); });
+          worker.on('error', error => { if (job.status === 'running') { job.error = error.message; job.status = 'error'; } clearTimeout(hardDeadline); });
           worker.on('exit', code => {
             clearTimeout(hardDeadline);
             if (job.status === 'running') { job.status = 'error'; job.error = `Search worker exited (${code}).`; }
@@ -178,7 +191,22 @@ export function createApp() {
       else res.end();
     }
   });
-  server.on('close', () => { for (const job of jobs.values()) void job.worker.terminate(); });
+  const shutdown = () => {
+    if (shuttingDown) return;
+    shuttingDown = true;
+    for (const job of jobs.values()) {
+      Atomics.store(job.cancelled, 0, 1);
+      clearTimeout(job.deadline);
+      if (job.status === 'running') job.status = 'cancelled';
+      void job.worker.terminate();
+    }
+    transformerRuntime.close();
+  };
+  // `close` waits for active HTTP requests. Reject pending model startup first,
+  // so an analysis awaiting startup cannot keep server shutdown open for a minute.
+  const close = server.close;
+  server.close = function (...args) { shutdown(); return close.apply(this, args); };
+  server.on('close', shutdown);
   return server;
 }
 
@@ -188,4 +216,7 @@ if (process.argv[1] && fileURLToPath(import.meta.url) === process.argv[1]) {
   const app = createApp();
   app.listen(port, '127.0.0.1', () => console.log(`Vibe-D AI is ready at http://127.0.0.1:${app.address().port}`));
   app.on('error', error => { console.error(error.message); process.exitCode = 1; });
+  const shutdown = () => { app.close(); app.closeAllConnections(); };
+  process.once('SIGINT', shutdown);
+  process.once('SIGTERM', shutdown);
 }

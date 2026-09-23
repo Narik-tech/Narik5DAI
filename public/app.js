@@ -13,7 +13,56 @@ let autoRevision = null;
 let initialPosition = true;
 let boardSize = Number($('board-size').value);
 const searchSettingsKey = 'vibe-d-ai.search-settings.v1';
-const searchSettingIds = ['time-budget', 'search-depth', 'node-budget', 'cache-memory'];
+const resourceSettingIds = ['time-budget', 'search-depth', 'node-budget', 'cache-memory'];
+const searchSettingIds = ['engine-select', ...resourceSettingIds];
+let refreshingEngines = false;
+let engines = {
+  classical: {id:'classical', available:true},
+  transformer: {id:'transformer', available:false, status:'checking'},
+};
+function selectedEngine() { return $('engine-select').value; }
+function engineAvailable() { return engines[selectedEngine()]?.available === true; }
+function engineIdleStatus() {
+  const info = engines[selectedEngine()];
+  return info?.status === 'checking' ? 'CHECKING' : info?.status === 'error' ? 'ERROR' : engineAvailable() ? 'READY' : 'SETUP';
+}
+
+function renderEngine() {
+  const neural = selectedEngine() === 'transformer';
+  const info = engines[selectedEngine()] || {};
+  const device = typeof info.device === 'string' ? ` · ${info.device}` : '';
+  $('engine-readiness').textContent = neural
+    ? info.status === 'error' ? info.error || 'Transformer could not load; check setup'
+      : info.available ? info.status === 'unloaded' ? 'Checkpoint ready · loads on first analysis' : `Transformer ready${device}`
+        : info.status === 'checking' ? 'Checking transformer availability…' : info.status === 'starting' ? 'Transformer starting…' : info.error || 'Transformer setup required'
+    : 'Classical search ready · CPU';
+  $('engine-readiness').classList.toggle('unavailable', neural && !info.available);
+  $('engine-description').textContent = neural
+    ? 'Experimental learned evaluation with bounded historical context and candidate turns. Playing strength is unmeasured; legal moves use the full rules.'
+    : 'Full-turn search with a handcrafted position evaluation.';
+  $('transformer-setup').hidden = !neural || (info.available && info.status !== 'error') || info.status === 'checking';
+  $('cache-memory-help').textContent = neural
+    ? 'The transformer uses its own bounded model memory. Search cache (RAM) applies to Classical search only.'
+    : 'Cache budget estimates RAM for saved search results; total RAM is higher. This CPU engine does not use GPU VRAM.';
+  $('refresh-engines').disabled = refreshingEngines;
+  if (!search) $('search-status').textContent = engineIdleStatus();
+  updateControls();
+}
+async function refreshEngines() {
+  if (refreshingEngines) return;
+  refreshingEngines = true;
+  renderEngine();
+  try {
+    const data = await api('/api/engines');
+    for (const info of data.engines || []) if (info.id === 'classical' || info.id === 'transformer') engines[info.id] = info;
+  } catch (error) {
+    engines.transformer = {id:'transformer', available:false, status:'error', error:`Availability check failed: ${error.message}`};
+  } finally {
+    refreshingEngines = false;
+    renderEngine();
+    scheduleOpponent();
+  }
+}
 
 function restoreSearchSettings() {
   try {
@@ -76,14 +125,15 @@ function updateControls() {
   $('submit-button').disabled = !hasGame || busy || !game.canSubmit;
   $('undo-button').disabled = !hasGame || busy || (!(game.pending?.length) && !(game.history?.length));
   $('new-button').disabled = busy || !hasGame;
-  $('analyze-button').disabled = !hasGame || busy;
+  $('analyze-button').disabled = !hasGame || busy || (!running && !engineAvailable());
   $('analyze-label').textContent = running ? 'Stop analysis' : 'Analyze position';
   $('analyze-button').classList.toggle('running', running);
-  $('play-button').disabled = busy || !search?.result?.bestAction || search?.revision !== game?.revision || running;
+  $('play-button').disabled = busy || !search?.result?.bestAction || search?.revision !== game?.revision || search?.engine !== selectedEngine() || running;
   $('import-pgn').disabled = busy;
   $('variant').disabled = busy;
   $('ai-side').disabled = busy;
-  for (const id of searchSettingIds) $(id).disabled = busy || running;
+  $('engine-select').disabled = busy;
+  for (const id of resourceSettingIds) $(id).disabled = busy || running || (id === 'cache-memory' && selectedEngine() === 'transformer');
 }
 function receiveGame(next) {
   game = next;
@@ -252,6 +302,7 @@ async function invalidateSearch() {
   clearTimeout(pollTimer); clearTimeout(autoTimer);
   const current = search;
   search = null;
+  renderAnalysis();
   if (current?.status === 'running') {
     try { await api(`/api/analysis/${encodeURIComponent(current.id)}/stop`,{}); } catch { /* A completed or expired search no longer needs cancellation. */ }
   }
@@ -274,6 +325,11 @@ function renderResourceStats(result) {
   const cacheMb = result?.limits?.cacheMemoryMb ?? Number($('cache-memory').value);
   const usedMb = Number.isFinite(result?.cacheMemoryBytes) ? (result.cacheMemoryBytes / 1048576).toFixed(1) : null;
   $('stat-node-budget').textContent = `Max nodes: ${compactNumber(maxNodes)}`;
+  if ((search?.engine || selectedEngine()) === 'transformer') {
+    $('stat-cache').textContent = result?.model?.device ? `Model: ${result.model.device}` : 'Model: transformer';
+    $('stat-cache').title = 'Transformer inference device. GPU memory is bounded by the model configuration.';
+    return;
+  }
   $('stat-cache').textContent = cacheMb === 0 ? 'Cache: off' : `Cache: ${usedMb === null ? '—' : `≈${usedMb}`} / ${cacheMb} MiB`;
   $('stat-cache').title = 'Estimated retained search-cache memory; not total process RAM or GPU VRAM.';
 }
@@ -281,7 +337,7 @@ function renderAnalysis() {
   const result = search?.result || search?.progress;
   const running = search?.status === 'running';
   const score = result?.score;
-  $('search-status').textContent = running ? 'SEARCHING' : result?.stoppedReason === 'cancelled' || search?.status === 'cancelled' ? 'STOPPED' : search?.status === 'done' ? result?.completed ? 'COMPLETE' : 'PARTIAL' : search?.status === 'error' ? 'ERROR' : 'READY';
+  $('search-status').textContent = running ? 'SEARCHING' : result?.stoppedReason === 'cancelled' || search?.status === 'cancelled' ? 'STOPPED' : search?.status === 'done' ? result?.completed ? 'COMPLETE' : 'PARTIAL' : search?.status === 'error' ? 'ERROR' : engineIdleStatus();
   $('search-status').classList.toggle('searching',running);
   const isMate = result?.scoreType === 'mate';
   $('eval-score').textContent = Number.isFinite(score) ? isMate ? `${score >= 0 ? '+' : '−'}M${Number.isFinite(result.mateIn) ? Math.abs(result.mateIn) : ''}` : `${score > 0 ? '+' : score < 0 ? '−' : ''}${(Math.abs(score)/100).toFixed(2)}` : '—';
@@ -294,7 +350,16 @@ function renderAnalysis() {
   $('stat-nps').textContent = compactNumber(result?.nps);
   $('stat-time').textContent = Number.isFinite(result?.elapsedMs) ? `${(result.elapsedMs / 1000).toFixed(1)}s` : '—';
   renderResourceStats(result);
-  const note = running && result ? `Searching depth ${result.searchingDepth ?? result.depth} · ${result.rootActionsSearched ?? 0} root turns compared` : !running && result?.stoppedReason === 'policy' ? 'Legal turns exist, but none satisfy the search restriction on optional boards. Play a turn manually.' : !running && result?.stoppedReason === 'nodes' ? 'Node limit reached. Increase Max nodes to search further within your think time.' : !running && search?.result && !result.completed ? Number.isFinite(score) ? 'Partial search; no full depth completed. Allow more think time for a deeper comparison.' : result.bestAction ? 'A legal fallback is available. Allow more think time to evaluate alternatives.' : 'No recommendation is available within the search limits.' : '';
+  let note = running && result ? `Searching depth ${result.searchingDepth ?? result.depth} · ${result.rootActionsSearched ?? 0} root turns compared` : !running && result?.stoppedReason === 'policy' ? 'Legal turns exist, but none satisfy the search restriction on optional boards. Play a turn manually.' : !running && result?.stoppedReason === 'nodes' ? 'Node limit reached. Increase Max nodes to search further within your think time.' : !running && search?.result && !result.completed ? Number.isFinite(score) ? 'Partial search; no full depth completed. Allow more think time for a deeper comparison.' : result.bestAction ? 'A legal fallback is available. Allow more think time to evaluate alternatives.' : 'No recommendation is available within the search limits.' : '';
+  if (search?.engine === 'transformer' && result) {
+    const candidateLimit = result.limits?.candidateLimit;
+    const tokenLimit = result.model?.config?.max_tokens;
+    const details = [Number.isFinite(candidateLimit) ? `Selective transformer search; up to ${candidateLimit} root candidate turns.` : 'Selective transformer search; candidate turns are capped.'];
+    if (Number.isFinite(tokenLimit)) details.push(`Model context: ${tokenLimit} tokens.`);
+    if (result.contextTruncated) details.push('Historical context was truncated for the model. Full history still determines legality.');
+    if (result.frontierTruncated) details.push('The position exceeds model context; some current-board features were omitted.');
+    note = [note, ...details].filter(Boolean).join(' ');
+  }
   $('analysis-note').textContent = note;
   $('analysis-note').hidden = !note;
   const bestNotation = notation(result?.notation) || (Array.isArray(result?.bestAction) ? result.bestAction.length ? result.bestAction.map(raw => readableMove({raw})).join(' / ') : 'Submit the current turn' : '');
@@ -307,18 +372,19 @@ function renderAnalysis() {
   updateControls();
 }
 async function startAnalysis(autoPlay = false) {
-  if (busy || !game || search?.status === 'running') return;
+  if (busy || !game || search?.status === 'running' || !engineAvailable()) return;
   if (!$('node-budget').reportValidity()) { if (autoPlay) autoRevision = null; return; }
   const options = {
+    engine: selectedEngine(),
     timeMs: Number($('time-budget').value), maxDepth: Number($('search-depth').value),
-    maxNodes: Number($('node-budget').value), cacheMemoryMb: Number($('cache-memory').value),
+    maxNodes: Number($('node-budget').value), cacheMemoryMb: selectedEngine() === 'transformer' ? 0 : Number($('cache-memory').value),
   };
   saveSearchSettings();
   const revision = game.revision;
   setBusy(true);
   try {
     const data = await api('/api/analyze', options);
-    search = {id:data.jobId,revision,status:'running',result:null,progress:null,autoPlay};
+    search = {id:data.jobId,revision,engine:options.engine,status:'running',result:null,progress:null,autoPlay};
     renderAnalysis();
     pollTimer = setTimeout(pollAnalysis,120);
   } catch (error) { toast(error.message,true); }
@@ -336,7 +402,7 @@ async function pollAnalysis() {
     renderAnalysis();
     if (data.status === 'running') pollTimer = setTimeout(pollAnalysis,350);
     else if (data.status === 'error') { toast(data.error || 'The engine could not complete this analysis.',true); }
-    else if (data.status === 'done' && current.autoPlay && current.revision === game.revision && current.result?.bestAction && $('ai-side').value === sideLabel().toLowerCase()) await playBest();
+    else if (data.status === 'done' && current.autoPlay && current.engine === selectedEngine() && current.revision === game.revision && current.result?.bestAction && $('ai-side').value === sideLabel().toLowerCase()) await playBest();
   } catch (error) {
     if (search === current) { current.status = 'error'; renderAnalysis(); toast(error.message,true); }
   }
@@ -349,7 +415,7 @@ async function stopAnalysis() {
   catch (error) { toast(error.message,true); }
 }
 async function playBest() {
-  if (busy || !search?.result?.bestAction || search.revision !== game?.revision) return;
+  if (busy || !search?.result?.bestAction || search.revision !== game?.revision || search.engine !== selectedEngine()) return;
   setBusy(true);
   try {
     const next = await api('/api/play',{jobId:search.id,revision:game.revision});
@@ -359,17 +425,26 @@ async function playBest() {
 }
 function scheduleOpponent() {
   clearTimeout(autoTimer);
-  if (!game || busy || search?.status === 'running' || game.pending?.length || $('ai-side').value !== sideLabel().toLowerCase() || autoRevision === game.revision) return;
+  if (!game || busy || !engineAvailable() || search?.status === 'running' || game.pending?.length || $('ai-side').value !== sideLabel().toLowerCase() || autoRevision === game.revision) return;
   autoRevision = game.revision;
   autoTimer = setTimeout(() => startAnalysis(true),250);
 }
 
 $('orientation').addEventListener('change',renderBoards);
-for (const id of searchSettingIds) $(id).addEventListener('change', () => {
+for (const id of resourceSettingIds) $(id).addEventListener('change', () => {
   saveSearchSettings();
   renderResourceStats(search?.result || search?.progress);
   scheduleOpponent();
 });
+$('engine-select').addEventListener('change', async () => {
+  saveSearchSettings();
+  autoRevision = null;
+  setBusy(true);
+  renderEngine();
+  try { await invalidateSearch(); }
+  finally { setBusy(false); scheduleOpponent(); }
+});
+$('refresh-engines').addEventListener('click', refreshEngines);
 $('show-history').addEventListener('change',() => { renderBoards(); scrollToPresent(); });
 $('board-size').addEventListener('input',() => { boardSize = Number($('board-size').value); renderBoards(); });
 $('submit-button').addEventListener('click',() => { if (game?.canSubmit) changeGame('/api/submit',{revision:game.revision},scrollToPresent); });
@@ -403,7 +478,9 @@ window.addEventListener('resize',positionPresentLine);
 for (const dialog of document.querySelectorAll('dialog')) dialog.addEventListener('click',(event) => { if (event.target === dialog) { const rect = dialog.getBoundingClientRect(); if (event.clientX < rect.left || event.clientX > rect.right || event.clientY < rect.top || event.clientY > rect.bottom) dialog.close(); } });
 if (window.innerWidth < 570) { boardSize = 34; $('board-size').value = '34'; }
 restoreSearchSettings();
+renderEngine();
 renderResourceStats();
+refreshEngines();
 try { receiveGame(await api('/api/game')); }
 catch (error) {
   $('connection').textContent = 'Engine unavailable';

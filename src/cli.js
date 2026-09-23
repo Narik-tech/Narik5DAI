@@ -2,6 +2,7 @@
 import { readFile } from 'node:fs/promises';
 import { Worker } from 'node:worker_threads';
 import { GameSession } from './session.js';
+import { TransformerRuntime, forwardInference } from './transformer-runtime.js';
 
 const HELP = `Vibe-D AI — full-turn analysis for 5D Chess
 
@@ -9,6 +10,7 @@ Usage: node src/cli.js [options]
   --file PATH       Load a 5DPGN game or 5DFEN position
   --pgn TEXT        Load notation directly (quote it in your shell)
   --variant NAME    Starting variant, default: standard
+  --engine NAME     classical (default) or transformer (requires trained model)
   --time SECONDS    Think time, default: 5 (maximum 3600)
   --depth NUMBER    Maximum complete-turn plies, default: 8
   --nodes NUMBER    Search + generation work budget, default: 2000000
@@ -28,7 +30,7 @@ Scores are centipawns from White's perspective; strength is not Elo-rated.
 
 function parseArgs(args) {
   const parsed = {};
-  const values = new Set(['file', 'pgn', 'variant', 'time', 'depth', 'nodes', 'qdepth']);
+  const values = new Set(['file', 'pgn', 'variant', 'engine', 'time', 'depth', 'nodes', 'qdepth']);
   const flags = new Set(['json', 'play', 'help']);
   for (let index = 0; index < args.length; index++) {
     const key = args[index].replace(/^--/, '');
@@ -53,41 +55,55 @@ async function main() {
   const seconds = args.time === undefined ? 5 : Number(args.time);
   if (!Number.isFinite(seconds) || seconds < 0.01 || seconds > 3600) throw new Error('--time must be between 0.01 and 3600 seconds.');
   const options = {
+    engine: args.engine || 'classical',
     timeMs: Math.round(seconds * 1000),
     maxDepth: integer(args.depth, 8, 1, 64, '--depth'),
     maxNodes: integer(args.nodes, 2000000, 1, 1000000000, '--nodes'),
     quiescenceDepth: integer(args.qdepth, 2, 0, 8, '--qdepth'),
   };
+  if (!['classical', 'transformer'].includes(options.engine)) throw new Error('--engine must be classical or transformer.');
   const pgn = args.file ? await readFile(args.file, 'utf8') : args.pgn;
   const game = new GameSession({ variant: args.variant, pgn });
   const cancelled = new Int32Array(new SharedArrayBuffer(4));
-  const worker = new Worker(new URL('./worker.js', import.meta.url), {
-    workerData: { position: game.position, options, cancelBuffer: cancelled.buffer },
-  });
-  const interrupt = () => Atomics.store(cancelled, 0, 1);
+  const runtime = new TransformerRuntime();
+  let worker, result;
+  const interrupt = () => {
+    Atomics.store(cancelled, 0, 1);
+    if (!worker) runtime.close();
+  };
   process.on('SIGINT', interrupt);
-  let progress;
-  const result = await new Promise((resolve, reject) => {
-    const deadline = setTimeout(() => {
-      void worker.terminate();
-      if (progress) resolve({ ...progress, stoppedReason: 'hard-time-limit' });
-      else reject(new Error('No legal action was found before the hard time limit. Try a longer budget.'));
-    }, options.timeMs + 5000);
-    worker.on('message', message => {
-      if (message.type === 'progress') {
-        progress = message.result;
-        if (!args.json) console.error(`depth ${progress.depth} | ${progress.score === null ? 'unscored' : (progress.score / 100).toFixed(2)} | ${progress.nodes} work nodes | ${progress.notation || 'searching'}`);
-      }
-      if (message.type === 'result') { clearTimeout(deadline); resolve(message.result); }
-      if (message.type === 'error') { clearTimeout(deadline); reject(new Error(message.error)); }
+  try {
+    const modelInfo = options.engine === 'transformer' ? await runtime.start() : null;
+    worker = new Worker(new URL('./worker.js', import.meta.url), {
+      workerData: { position: game.position, options, model: modelInfo?.model, cancelBuffer: cancelled.buffer },
     });
-    worker.on('error', error => { clearTimeout(deadline); reject(error); });
-    worker.on('exit', code => {
-      clearTimeout(deadline);
-      if (code !== 0) reject(new Error(`Search worker exited (${code}).`));
+    let progress;
+    result = await new Promise((resolve, reject) => {
+      const deadline = setTimeout(() => {
+        void worker.terminate();
+        if (progress) resolve({ ...progress, stoppedReason: 'hard-time-limit' });
+        else reject(new Error('No legal action was found before the hard time limit. Try a longer budget.'));
+      }, options.timeMs + 5000);
+      worker.on('message', message => {
+        if (message.type === 'evaluate') { void forwardInference(worker, runtime, message); return; }
+        if (message.type === 'progress') {
+          progress = message.result;
+          if (!args.json) console.error(`depth ${progress.depth} | ${progress.score === null ? 'unscored' : (progress.score / 100).toFixed(2)} | ${progress.nodes} work nodes | ${progress.notation || 'searching'}`);
+        }
+        if (message.type === 'result') { clearTimeout(deadline); resolve(message.result); }
+        if (message.type === 'error') { clearTimeout(deadline); reject(new Error(message.error)); }
+      });
+      worker.on('error', error => { clearTimeout(deadline); reject(error); });
+      worker.on('exit', code => {
+        clearTimeout(deadline);
+        reject(new Error(`Search worker exited (${code}) before returning a result.`));
+      });
     });
-  });
-  process.off('SIGINT', interrupt);
+  } finally {
+    runtime.close();
+    process.off('SIGINT', interrupt);
+    if (worker) await worker.terminate();
+  }
   if (args.play && Array.isArray(result.bestAction)) {
     game.play(result.bestAction);
     result.pgn = game.chess.export();

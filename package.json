@@ -13,7 +13,15 @@
     "benchmark": "node scripts/benchmark.js",
     "strength": "node scripts/strength.js",
     "match": "node scripts/match.js",
-    "selfplay": "node scripts/selfplay.js"
+    "selfplay": "node scripts/selfplay.js",
+    "transformer:setup": "node scripts/transformer.js setup",
+    "transformer:doctor": "node scripts/transformer.js doctor",
+    "transformer:data": "node scripts/transformer-data.js",
+    "transformer:train": "node scripts/transformer.js train",
+    "transformer:evaluate": "node scripts/transformer.js evaluate",
+    "transformer:selfplay": "node scripts/transformer-selfplay.js",
+    "transformer:test": "node scripts/transformer.js test",
+    "transformer:smoke": "node scripts/transformer-smoke.js"
   },
   "dependencies": { "5d-chess-js": "1.2.1" }
 }

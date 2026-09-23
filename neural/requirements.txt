@@ -1,0 +1,2 @@
+# Install the CUDA wheel for your driver from https://pytorch.org/get-started/locally/
+torch==2.14.0
