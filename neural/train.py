@@ -1,8 +1,10 @@
-"""Train a bounded-memory Transformer value model on JSONL {position,value} rows.
+"""Train a bounded-memory Transformer value model on JSONL {position,value,weight?} rows.
 
 Values are white-relative centipawns, transformed to tanh(value / 1000). This is
 supervised value learning; heuristic labels bootstrap a model but prove no
 playing strength. Supply independent validation data to measure generalization.
+Optional positive weights default to one and are normalized by the dataset mean
+for training; validation metrics remain unweighted.
 """
 
 import argparse
@@ -20,11 +22,8 @@ import time
 MAX_LINE_BYTES = 32 * 1024 * 1024
 
 
-def records(path, max_tokens):
-    try:
-        from .encoding import encode_position
-    except ImportError:
-        from encoding import encode_position
+def _rows(path):
+    """Validate JSONL labels and optional weights without encoding positions."""
     with open(path, "rb") as stream:
         line_number = 0
         while True:
@@ -41,17 +40,52 @@ def records(path, max_tokens):
                 value = row["value"]
                 if type(value) not in (int, float) or not math.isfinite(value):
                     raise ValueError("value must be finite white-relative centipawns")
-                yield encode_position(row["position"], max_tokens), math.tanh(value / 1000)
+                weight = row.get("weight", 1)
+                if type(weight) not in (int, float) or not math.isfinite(weight) or weight <= 0:
+                    raise ValueError("weight must be positive and finite")
+                yield row["position"], math.tanh(value / 1000), weight, line_number
             except (KeyError, TypeError, ValueError) as error:
                 raise ValueError(f"{path}:{line_number}: {error}") from error
 
 
-def stream_training(path, max_tokens, buffer_size, rng):
+def records(path, max_tokens, include_weight=False):
+    try:
+        from .encoding import encode_position
+    except ImportError:
+        from encoding import encode_position
+    for position, target, weight, line_number in _rows(path):
+        try:
+            encoded = encode_position(position, max_tokens)
+        except (KeyError, TypeError, ValueError) as error:
+            raise ValueError(f"{path}:{line_number}: {error}") from error
+        # Evaluators retain their existing unweighted pair interface.
+        yield (encoded, target, weight) if include_weight else (encoded, target)
+
+
+def dataset_weight_mean(path):
+    # A streaming mean avoids retaining/encoding the dataset or overflowing a
+    # sum of individually finite weights. Normalize once, never per minibatch.
+    mean, count = 0.0, 0
+    for _, _, weight, _ in _rows(path):
+        count += 1
+        mean += (weight - mean) / count
+    if not count:
+        raise ValueError(f"training file has no examples: {path}")
+    return mean
+
+
+def weighted_mse(prediction, targets, weights):
+    # Dividing by this batch's weight sum would cancel all weights at batch
+    # size one and undo equal-game weighting when game lengths differ.
+    return ((prediction.float() - targets).square() * weights).mean()
+
+
+def stream_training(path, max_tokens, buffer_size, rng, include_weight=False):
     # Only encoded, bounded-token records enter the shuffle buffer. No complete
     # dataset or collection of full multiverse histories is retained in RAM.
     while True:
         buffer, count = [], 0
-        for record in records(path, max_tokens):
+        for record in records(path, max_tokens, include_weight=include_weight):
             count += 1
             if len(buffer) < buffer_size:
                 buffer.append(record)
@@ -95,6 +129,8 @@ def save_checkpoint(path, model, optimizer, steps, examples, args, loss, validat
                "training": {"data": str(Path(args.data).resolve()), "seed": args.seed,
                             "dataSha256": args.data_sha256,
                             "batchSize": args.batch_size, "learningRate": args.learning_rate,
+                            "sampleWeightMean": args.sample_weight_mean,
+                            "lossWeighting": "dataset-normalized sample weights",
                             "loss": loss, "validation": validation,
                             "torchVersion": str(torch.__version__)}}
     if selection is not None:
@@ -160,6 +196,7 @@ def main():
             for chunk in iter(lambda: data_stream.read(1024 * 1024), b""):
                 data_hash.update(chunk)
         args.data_sha256 = data_hash.hexdigest()
+        args.sample_weight_mean = dataset_weight_mean(args.data)
         torch.manual_seed(args.seed)
         rng = random.Random(args.seed)
         device = choose_device(args.device)
@@ -175,7 +212,7 @@ def main():
             for group in optimizer.param_groups:
                 group["lr"], group["weight_decay"] = args.learning_rate, args.weight_decay
         scaler = torch.amp.GradScaler("cuda", enabled=device.type == "cuda")
-        stream = iter(stream_training(args.data, model.config.max_tokens, args.shuffle_buffer, rng))
+        stream = iter(stream_training(args.data, model.config.max_tokens, args.shuffle_buffer, rng, include_weight=True))
         previous_steps = checkpoint.get("trainedSteps", 0)
         examples = checkpoint.get("examplesSeen", 0)
         updates, attempts, truncated = 0, 0, 0
@@ -185,7 +222,9 @@ def main():
         model.train()
         print(json.dumps({"event": "start", "device": str(device), "config": asdict(model.config),
                           "parameters": sum(parameter.numel() for parameter in model.parameters()),
-                          "additionalSteps": args.steps, "previousSteps": previous_steps}), flush=True)
+                          "additionalSteps": args.steps, "previousSteps": previous_steps,
+                          "sampleWeightMean": args.sample_weight_mean,
+                          "lossWeighting": "dataset-normalized sample weights"}), flush=True)
         baseline_validation = validation_loss(model, args.validation_data, device, args.batch_size, args.validation_batches) if args.validation_data else None
         # An untrained baseline can be measured but cannot become a playable
         # checkpoint. A resumed, trained baseline is eligible immediately.
@@ -206,10 +245,11 @@ def main():
             rows = [next(stream) for _ in range(args.batch_size)]
             batch = collate([row[0] for row in rows], device)
             targets = torch.tensor([row[1] for row in rows], dtype=torch.float32, device=device)
+            weights = torch.tensor([row[2] / args.sample_weight_mean for row in rows], dtype=torch.float32, device=device)
             optimizer.zero_grad(set_to_none=True)
             with torch.autocast(device_type=device.type, dtype=torch.float16, enabled=device.type == "cuda"):
                 prediction = model(*batch)
-                loss = torch.nn.functional.mse_loss(prediction.float(), targets)
+                loss = weighted_mse(prediction, targets, weights)
             if not torch.isfinite(loss):
                 raise RuntimeError("nonfinite training loss; reduce learning rate or inspect data")
             scaler.scale(loss).backward()

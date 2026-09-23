@@ -16,14 +16,26 @@ CUDA environment and a trained checkpoint. For a fresh installation, first run
 One cycle with the default settings:
 
 ```powershell
-npm run transformer:selfplay -- --iterations 1 --device cuda
+node scripts/transformer-selfplay.js --iterations 1 --device cuda
 ```
 
 Continuous operation until **Ctrl+C**:
 
 ```powershell
-npm run transformer:selfplay -- --iterations 0 --device cuda
+node scripts/transformer-selfplay.js --iterations 0 --device cuda
 ```
+
+For continuous operation with automatic device selection (CUDA when available),
+the shortcut requires no forwarded arguments:
+
+```powershell
+npm run transformer:selfplay:continuous
+```
+
+Use the direct `node` commands when setting options. PowerShell's `npm.ps1`
+wrapper can strip forwarded flag names, leaving values such as `0 cuda` for
+the runner. Calling `node scripts/transformer-selfplay.js` directly avoids
+that argument-forwarding issue.
 
 Rerun the same command to continue using the saved replay buffer and current
 accepted model. Iteration numbers and seeds advance. Each cycle starts training
@@ -34,7 +46,7 @@ starts on the next invocation; partially completed training is not resumed.
 A longer run with more games and a larger acceptance sample:
 
 ```powershell
-npm run transformer:selfplay -- --iterations 0 --device cuda --games 16 --plies 64 --steps 1000 --batch-size 32 --nodes 40000 --time-ms 5000 --arena-pairs 12 --min-pairs 8 --arena-plies 128
+node scripts/transformer-selfplay.js --iterations 0 --device cuda --games 16 --plies 64 --steps 1000 --batch-size 32 --nodes 40000 --time-ms 5000 --arena-pairs 12 --min-pairs 8 --arena-plies 128
 ```
 
 These settings can take substantial time. Legal move generation runs on the
@@ -48,7 +60,7 @@ For an isolated short pipeline check, copy the active checkpoint first:
 ```powershell
 New-Item -ItemType Directory -Force artifacts/transformer/selfplay-check | Out-Null
 Copy-Item artifacts/transformer/model.pt artifacts/transformer/selfplay-check/active.pt
-npm run transformer:selfplay -- --iterations 1 --device cuda --checkpoint artifacts/transformer/selfplay-check/active.pt --run-dir artifacts/transformer/selfplay-check/run --games 2 --plies 4 --steps 16 --depth 1 --nodes 3000 --time-ms 1000 --arena-pairs 1 --min-pairs 1 --arena-plies 4 --replay-size 128
+node scripts/transformer-selfplay.js --iterations 1 --device cuda --checkpoint artifacts/transformer/selfplay-check/active.pt --run-dir artifacts/transformer/selfplay-check/run --games 2 --plies 4 --steps 16 --depth 1 --nodes 3000 --time-ms 1000 --arena-pairs 1 --min-pairs 1 --arena-plies 4 --replay-size 128
 ```
 
 Short checks usually fail the promotion gate because games are unfinished or
@@ -65,11 +77,12 @@ if you want to preserve an earlier check's copied checkpoint.
 | Exploration | 20% probability during the first 12 turns |
 | Training | 500 additional updates, batch 16, learning rate 0.0001 |
 | Replay | At most 8,192 unique full-history positions |
+| Training weights | Equal total weight per self-play game represented in replay |
 | Arena | 8 distinct starts, 2 games/start with colors swapped, 80 turns/game |
 | Promotion | At least 4 completed distinct pairs; candidate score at least 55% |
 | Retention | Latest 5 iteration folders, replay, latest report and previous model |
 
-See all options with `npm run transformer:selfplay -- --help`.
+See all options with `node scripts/transformer-selfplay.js --help`.
 `--plies` counts submitted full player turns, including turns requiring moves
 on multiple boards. Exploration samples from a bounded prefix of up to 32 legal
 complete turns; it is not uniform over the entire 5D action space. Seeds control
@@ -105,6 +118,25 @@ includes side to move, promotions and the full multiverse history. New labels
 replace old labels for duplicated positions. JSONL is streamed with a 4 MiB
 per-record limit; malformed examples fail the update without partial replacement.
 
+After deduplication, arena exclusions and buffer trimming, the replay assigns
+equal total training weight to every self-play game that still has samples.
+For `S` retained self-play samples from `G` games, a game with `n` retained
+samples gives each sample weight `S / (G * n)`. A short finished game and a
+long unfinished game therefore have the same total weight; targets themselves
+are unchanged. The total self-play weight remains `S`, preserving its overall
+balance with teacher data. Games with no retained samples cannot contribute.
+
+Weights are rebuilt on every replay update, including old replay files whose
+self-play rows already have `gameId` (scoped by run and iteration provenance).
+Legacy rows without a recoverable game ID
+keep their existing weight (default 1); the report counts these as
+`replay.weighting.ungroupedSamples`. Teacher rows also retain their existing
+weight or default to 1. Explicit weights must be finite and positive.
+The trainer uses weighted squared error, normalized by the mean weight across
+the whole dataset, so weighting still works with batch size 1. Validation
+metrics remain unweighted per-position measurements. No unfinished result is
+converted to a draw or loss by this balancing.
+
 ## Acceptance and the UI
 
 Default self-play starts come from `examples/matches/training.json`; arena starts
@@ -119,6 +151,15 @@ results and meaningful play. Duplicate or already-terminal starts do not count.
 An unfinished game excludes its whole pair; any invalid game vetoes promotion.
 The candidate must exceed 50% and meet `--promotion-score`, after at least
 `--min-pairs` complete distinct pairs. The default threshold is 55%.
+
+Arena reports include `summary.completion` and `decision.completion`, also
+saved in `latest.json` under `arena`. These show certified game completion,
+complete-pair and eligible-pair rates alongside the candidate score, with
+counts, denominators, unfinished reasons and a candidate-color breakdown.
+Rates use all attempted games or recorded pairs, including unfinished/invalid
+ones; they are `null` when nothing was attempted. Skipped starts are listed
+separately. Completion rates describe the joint match, not which engine caused
+a game to stop. They are diagnostic metrics and do not change the promotion gate.
 
 If too few pairs finish, inspect the recorded reasons and increase `--arena-plies`,
 `--nodes` or `--time-ms`, or supply suitable nonterminal miniature starts. A time

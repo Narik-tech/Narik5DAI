@@ -118,6 +118,7 @@ export async function acquireRunLock(runDir) {
 function validateSample(record, label) {
   const fail = detail => { throw new Error(`Invalid replay sample (${label}): ${detail}.`); };
   if (!record || typeof record !== 'object' || Array.isArray(record) || !Number.isFinite(record.value)) fail('value must be finite');
+  if (Object.hasOwn(record, 'weight') && (!Number.isFinite(record.weight) || record.weight <= 0)) fail('weight must be finite and positive');
   const position = record.position;
   if (!position || typeof position !== 'object' || Array.isArray(position)
     || !Number.isInteger(position.action) || position.action < 0 || position.action > 1_000_000
@@ -144,6 +145,38 @@ function validateSample(record, label) {
   try { text = JSON.stringify(record); } catch { fail('sample is not JSON serializable'); }
   if (Buffer.byteLength(text) > MAX_REPLAY_LINE_BYTES) fail('sample exceeds the 4 MiB line limit');
   return {record:JSON.parse(text), key:hash(positionKey(position))};
+}
+
+// Balance the rows that actually survive replay selection, not original game
+// lengths: deduplication, exclusions and eviction can remove different shares
+// of each game. Preserve total self-play weight so seed data keeps its share.
+function balanceGameWeights(records) {
+  const gameKey = record => record.source === 'transformer-selfplay'
+    && typeof record.gameId === 'string' && record.gameId.trim()
+    // Existing IDs include the seed, which can be reused when resuming with
+    // different CLI options. Iteration provenance keeps those games separate.
+    ? JSON.stringify([record.provenance?.runId ?? null, record.provenance?.iteration ?? null, record.gameId]) : null;
+  const gameCounts = new Map();
+  let samples = 0, ungroupedSamples = 0;
+  for (const record of records) {
+    if (record.source !== 'transformer-selfplay') continue;
+    const key = gameKey(record);
+    if (key === null) {
+      ungroupedSamples++;
+      continue;
+    }
+    samples++;
+    gameCounts.set(key, (gameCounts.get(key) || 0) + 1);
+  }
+  const weightPerGame = gameCounts.size ? samples / gameCounts.size : null;
+  for (const record of records) {
+    const key = gameKey(record);
+    if (key !== null) {
+      record.weight = weightPerGame / gameCounts.get(key);
+    }
+  }
+  return {method:'equal-retained-game-weight', games:gameCounts.size, samples,
+    weightPerGame, ungroupedSamples};
 }
 
 async function* jsonLines(file) {
@@ -266,14 +299,20 @@ export async function updateReplay({replayPath, newSamples = [], seedData, maxSa
   const extra = remaining ? incomingRecords.filter(item => !selectedKeys.has(item.key)).slice(-remaining) : [];
   const selected = [...older, ...extra, ...reserved].map(item => item.record);
   if (!selected.length) throw new Error('Replay requires at least one valid sample after exclusions.');
+  const weighting = balanceGameWeights(selected);
   const counts = new Map();
   for (const record of selected) {
     const source = typeof record.source === 'string' ? record.source : 'unknown';
     counts.set(source, (counts.get(source) || 0) + 1);
   }
-  const text = selected.map(record => JSON.stringify(record)).join('\n') + '\n';
+  const text = selected.map(record => {
+    const line = JSON.stringify(record);
+    // Adding/recalculating weights must not create a file we cannot read back.
+    if (Buffer.byteLength(line) > MAX_REPLAY_LINE_BYTES) throw new Error('Weighted replay sample exceeds the 4 MiB line limit.');
+    return line;
+  }).join('\n') + '\n';
   await atomicWrite(replayPath, text);
-  return {samples:selected.length, sourceCounts:Object.fromEntries(counts), sha256:hash(text), excludedSamples};
+  return {samples:selected.length, sourceCounts:Object.fromEntries(counts), sha256:hash(text), excludedSamples, weighting};
 }
 
 /**

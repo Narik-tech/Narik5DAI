@@ -135,8 +135,11 @@ or strength estimate. The bootstrap has no held-out validation claim.
 ## Training
 
 For iterative training from the model's own games, see [continuous self-play](transformer-selfplay.md).
-Run `npm run transformer:selfplay -- --iterations 0 --device cuda` after creating
+Run `node scripts/transformer-selfplay.js --iterations 0 --device cuda` after creating
 a checkpoint; candidates are evaluated before they replace the UI's active model.
+The shortcut `npm run transformer:selfplay:continuous` selects CUDA when available
+and requires no forwarded arguments. Use direct `node` invocation for options:
+PowerShell's `npm.ps1` wrapper can strip forwarded flag names.
 
 [The September 23 expanded training report](transformer-training-20260923.md)
 records the locally installed checkpoint, validation comparison, and backups.

@@ -16,6 +16,16 @@ async function fixture(t) {
 const sample = (id, source = 'seed') => ({position:{action:0, board:[[[[id % 25, Math.floor(id / 25) % 25]]]], promotions:[]}, value:id, source});
 const jsonl = records => records.map(record => JSON.stringify(record)).join('\n') + '\n';
 const recordsAt = async file => (await readFile(file, 'utf8')).trim().split('\n').map(JSON.parse);
+const gameSample = (id, gameId, gameResult = 'UNFINISHED') => ({
+  ...sample(id, 'transformer-selfplay'), gameId, gameResult,
+});
+const gameWeights = records => {
+  const totals = {};
+  for (const row of records.filter(row => row.source === 'transformer-selfplay' && row.gameId)) {
+    totals[row.gameId] = (totals[row.gameId] || 0) + row.weight;
+  }
+  return totals;
+};
 
 test('atomic writes replace complete text/binary files and incremental hash matches contents', async t => {
   const file = await fixture(t), active = file('nested/active.pt');
@@ -111,6 +121,91 @@ test('arena exclusions remove seeded and incoming samples while preserving the o
   const original = await fileHash(replayPath);
   await assert.rejects(updateReplay({replayPath, excludePositionKeys:new Set(stored.map(record => positionKey(record.position)))}), /at least one valid sample after exclusions/);
   assert.equal(await fileHash(replayPath), original);
+});
+
+test('short finished and long unfinished games have equal total weight without changing teacher share or targets', async t => {
+  const file = await fixture(t), replayPath = file('replay.jsonl');
+  const newSamples = [sample(0), gameSample(1, 'short', 'WHITE_WIN'),
+    ...[2, 3, 4].map(id => gameSample(id, 'long'))];
+  const original = structuredClone(newSamples);
+  const result = await updateReplay({replayPath, newSamples, maxSamples:10});
+  const stored = await recordsAt(replayPath);
+  assert.deepEqual(gameWeights(stored), {short:2, long:2});
+  assert.equal(stored.reduce((sum, row) => sum + (row.weight ?? 1), 0), 5);
+  assert.deepEqual(stored.find(row => row.source === 'seed'), sample(0));
+  assert.deepEqual(stored.map(({weight, ...row}) => row), newSamples);
+  assert.deepEqual(newSamples, original, 'caller records must remain unchanged');
+  assert.deepEqual(result.weighting, {method:'equal-retained-game-weight', games:2,
+    samples:4, weightPerGame:2, ungroupedSamples:0});
+});
+
+test('weights are rebuilt after deduplication, arena exclusion and replay capacity selection', async t => {
+  const file = await fixture(t), replayPath = file('replay.jsonl');
+  const excluded = gameSample(6, 'long');
+  const newSamples = [...[1, 2, 3, 4, 5].map(id => gameSample(id, 'long')),
+    excluded, gameSample(5, 'short', 'BLACK_WIN')];
+  await updateReplay({replayPath, newSamples, maxSamples:3,
+    excludePositionKeys:new Set([positionKey(excluded.position)])});
+  const stored = await recordsAt(replayPath);
+  assert.deepEqual(stored.map(row => row.value), [3, 4, 5]);
+  assert.deepEqual(gameWeights(stored), {long:1.5, short:1.5});
+  assert.equal(stored[2].gameResult, 'BLACK_WIN', 'latest duplicate owns the target and game');
+  await updateReplay({replayPath, maxSamples:3});
+  assert.deepEqual((await recordsAt(replayPath)).sort((a, b) => a.value - b.value), stored,
+    'resuming does not compound weights');
+  const report = await updateReplay({replayPath, maxSamples:3,
+    excludePositionKeys:new Set([positionKey(stored[0].position)])});
+  assert.deepEqual(gameWeights(await recordsAt(replayPath)), {long:1, short:1});
+  assert.equal(report.weighting.weightPerGame, 1);
+});
+
+test('existing unweighted self-play is balanced on resume and ungrouped legacy rows remain usable', async t => {
+  const file = await fixture(t), replayPath = file('replay.jsonl');
+  const legacy = sample(4, 'transformer-selfplay');
+  const teacher = {...sample(5), weight:2};
+  await writeFile(replayPath, jsonl([gameSample(1, 'old-short', 'DRAW'),
+    gameSample(2, 'old-long'), gameSample(3, 'old-long'), legacy, teacher]));
+  const report = await updateReplay({replayPath, maxSamples:10});
+  const stored = await recordsAt(replayPath), totals = gameWeights(stored);
+  assert.equal(totals['old-short'], 1.5);
+  assert.equal(totals['old-long'], 1.5);
+  assert.deepEqual(stored.find(row => row.value === 4), legacy);
+  assert.deepEqual(stored.find(row => row.value === 5), teacher);
+  assert.equal(report.weighting.ungroupedSamples, 1);
+});
+
+test('invalid sample weights fail atomically even when balancing would replace them', async t => {
+  const file = await fixture(t), replayPath = file('replay.jsonl');
+  await writeFile(replayPath, jsonl([sample(0)]));
+  const originalHash = await fileHash(replayPath);
+  for (const weight of [0, -1, Infinity, NaN, null, '1', true]) {
+    await assert.rejects(updateReplay({replayPath,
+      newSamples:[{...gameSample(1, 'bad'), weight}]}), /weight must be finite and positive/);
+    assert.equal(await fileHash(replayPath), originalHash);
+  }
+});
+
+test('reused game IDs from different runs or resumed iterations are weighted separately', async t => {
+  const file = await fixture(t), replayPath = file('replay.jsonl');
+  const newSamples = [
+    {...gameSample(1, 'reused'), provenance:{runId:'run-a', iteration:1}},
+    {...gameSample(2, 'reused'), provenance:{runId:'run-a', iteration:2}},
+    {...gameSample(3, 'reused'), provenance:{runId:'run-a', iteration:2}},
+    {...gameSample(4, 'reused'), provenance:{runId:'run-b', iteration:1}},
+  ];
+  const result = await updateReplay({replayPath, newSamples, maxSamples:10});
+  assert.equal(result.weighting.games, 3);
+  assert.deepEqual((await recordsAt(replayPath)).map(row => row.weight), [4 / 3, 2 / 3, 2 / 3, 4 / 3]);
+});
+
+test('adding weights cannot publish an oversized replay line', async t => {
+  const file = await fixture(t), replayPath = file('replay.jsonl');
+  await writeFile(replayPath, jsonl([sample(0)]));
+  const originalHash = await fileHash(replayPath);
+  const incoming = {...gameSample(1, 'large'), padding:''};
+  incoming.padding = 'x'.repeat(MAX_REPLAY_LINE_BYTES - Buffer.byteLength(JSON.stringify(incoming)));
+  await assert.rejects(updateReplay({replayPath, newSamples:[incoming]}), /Weighted replay sample exceeds the 4 MiB/);
+  assert.equal(await fileHash(replayPath), originalHash);
 });
 
 test('JSONL input streams CRLF, multibyte chunk boundaries, and final line without newline', async t => {

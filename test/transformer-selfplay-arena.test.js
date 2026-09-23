@@ -61,6 +61,31 @@ test('unfinished pairs never score and any invalid game vetoes otherwise winning
   assert.equal(decidePromotion(report).promote, false);
 });
 
+test('completion rates include unfinished games and distinguish certified, complete and eligible results', () => {
+  const report = syntheticPairs(Array(5).fill(['A_WIN', 'A_WIN']));
+  Object.assign(report.games[3], { result: 'UNFINISHED', reason: 'ply-limit' });
+  for (const index of report.pairs[2].gameIndices) Object.assign(report.games[index], { moves: [], plies: 0 });
+  report.pairs[3].initialKey = report.pairs[0].initialKey;
+  for (const index of report.pairs[3].gameIndices) report.games[index].initialKey = report.pairs[0].initialKey;
+  Object.assign(report.games[9], { result: 'UNFINISHED', valid: false, reason: 'engine-error' });
+
+  const decision = decidePromotion({ ...report, minPairs: 1 });
+  assert.equal(decision.reason, 'invalid-games');
+  assert.equal(decision.candidateScore, 1);
+  assert.equal(decision.candidatePoints, 2);
+  assert.deepEqual(decision.completion, {
+    totalGames: 10, certifiedGames: 8, gameCompletionRate: 0.8,
+    unfinishedReasons: { 'ply-limit': 1, 'engine-error': 1 },
+    totalPairs: 5, completePairs: 3, pairCompletionRate: 0.6,
+    eligiblePairs: 1, eligiblePairRate: 0.2,
+    byCandidateColor: {
+      white: { totalGames: 5, certifiedGames: 5, gameCompletionRate: 1, unfinishedReasons: {} },
+      black: { totalGames: 5, certifiedGames: 3, gameCompletionRate: 0.6,
+        unfinishedReasons: { 'ply-limit': 1, 'engine-error': 1 } },
+    },
+  });
+});
+
 test('gate rejects mismatched starts, wrong color pairs, fake terminal results and below-threshold scores', () => {
   const report = syntheticPairs([['A_WIN', 'DRAW'], ['A_WIN', 'B_WIN']]);
   assert.equal(decidePromotion({ ...report, minPairs: 2, promotionScore: 0.7 }).reason, 'below-promotion-score');
@@ -71,6 +96,8 @@ test('gate rejects mismatched starts, wrong color pairs, fake terminal results a
   const fake = syntheticPairs([['A_WIN', 'A_WIN']]);
   fake.games[0].certificate.winnerColor = 1;
   assert.equal(decidePromotion({ ...fake, minPairs: 1 }).eligiblePairs, 0);
+  assert.equal(decidePromotion({ ...fake, minPairs: 1 }).completion.certifiedGames, 1);
+  assert.equal(decidePromotion({ ...fake, minPairs: 1 }).completion.gameCompletionRate, 0.5);
 });
 
 test('arena rotates deterministically, deduplicates complete positions, swaps colors and leaves inputs untouched', async () => {
@@ -91,6 +118,9 @@ test('arena rotates deterministically, deduplicates complete positions, swaps co
   assert(report.games.every(game => game.valid));
   assert(report.pairs.every(pair => report.games[pair.gameIndices[0]].initialKey === report.games[pair.gameIndices[1]].initialKey));
   assert.equal(report.decision.promote, false);
+  assert.deepEqual(report.summary.completion, report.decision.completion);
+  assert.equal(report.summary.completion.totalPairs, 2);
+  assert.equal(report.summary.completion.totalGames, 4);
 });
 
 test('terminal starts never run engines or count towards a minimum', async () => {
@@ -100,6 +130,14 @@ test('terminal starts never run engines or count towards a minimum', async () =>
   assert.equal(report.games.length, 0);
   assert.equal(report.skippedCases[0].reason, 'terminal-start');
   assert.equal(report.decision.promote, false);
+  assert.deepEqual(report.decision.completion, {
+    totalGames: 0, certifiedGames: 0, gameCompletionRate: null, unfinishedReasons: {},
+    totalPairs: 0, completePairs: 0, pairCompletionRate: null, eligiblePairs: 0, eligiblePairRate: null,
+    byCandidateColor: {
+      white: { totalGames: 0, certifiedGames: 0, gameCompletionRate: null, unfinishedReasons: {} },
+      black: { totalGames: 0, certifiedGames: 0, gameCompletionRate: null, unfinishedReasons: {} },
+    },
+  });
 });
 
 test('real one-turn mates complete a balanced meaningful pair and do not promote a tie', async () => {
@@ -110,6 +148,9 @@ test('real one-turn mates complete a balanced meaningful pair and do not promote
   assert.equal(report.decision.candidateScore, 0.5);
   assert.equal(report.decision.promote, false);
   assert(report.games.every(game => game.plies === 1 && game.reason === 'checkmate'));
+  assert.equal(report.summary.completion.gameCompletionRate, 1);
+  assert.equal(report.summary.completion.pairCompletionRate, 1);
+  assert.equal(report.summary.completion.eligiblePairRate, 1);
 });
 
 test('cancellation rejects before games and while awaiting an unresponsive engine', async () => {

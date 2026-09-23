@@ -10,6 +10,7 @@ import subprocess
 import sys
 import tempfile
 import unittest
+from unittest.mock import patch
 
 ROOT = Path(__file__).resolve().parents[1]
 if __package__ in (None, ""):
@@ -69,6 +70,40 @@ class EncodingTests(unittest.TestCase):
                         {"board": [[[[True]]]], "action": 0}, {"board": [[[[0], [0, 0]]]], "action": 0}):
             with self.assertRaises(ValueError):
                 encode_position(invalid)
+
+
+class TrainingDataTests(unittest.TestCase):
+    def test_legacy_records_and_optional_weights_preserve_evaluation_pairs(self):
+        from neural.train import dataset_weight_mean, records
+        with tempfile.TemporaryDirectory() as directory:
+            data = Path(directory) / "train.jsonl"
+            rows = [{"position": position(), "value": 400},
+                    {"position": position(), "value": -400, "weight": 3}]
+            data.write_text("\n".join(json.dumps(row) for row in rows) + "\n", encoding="utf-8")
+            pairs = list(records(data, 64))
+            weighted = list(records(data, 64, include_weight=True))
+            self.assertEqual([len(row) for row in pairs], [2, 2])
+            self.assertEqual([row[:2] for row in weighted], pairs)
+            self.assertEqual([row[2] for row in weighted], [1, 3])
+            self.assertAlmostEqual(pairs[0][1], math.tanh(0.4))
+            with patch("neural.encoding.encode_position", side_effect=AssertionError("must not encode during weight scan")):
+                self.assertEqual(dataset_weight_mean(data), 2)
+
+    def test_invalid_weights_fail_with_file_and_line(self):
+        from neural.train import dataset_weight_mean, records
+        with tempfile.TemporaryDirectory() as directory:
+            data = Path(directory) / "train.jsonl"
+            legacy = json.dumps({"position": position(), "value": 400})
+            for weight in (0, -1, True, None, "1", [], {}, float("nan"), float("inf"), -float("inf")):
+                with self.subTest(weight=weight):
+                    invalid = json.dumps({"position": position(), "value": 400, "weight": weight})
+                    data.write_text(legacy + "\n" + invalid + "\n", encoding="utf-8")
+                    for read in (lambda: list(records(data, 64, include_weight=True)), lambda: dataset_weight_mean(data)):
+                        with self.assertRaisesRegex(ValueError, "train.jsonl:2: weight must be positive and finite"):
+                            read()
+            data.write_text("\n", encoding="utf-8")
+            with self.assertRaisesRegex(ValueError, "training file has no examples"):
+                dataset_weight_mean(data)
 
 
 @unittest.skipUnless(importlib.util.find_spec("torch"), "PyTorch is not installed")
@@ -141,10 +176,81 @@ class ModelTests(unittest.TestCase):
                        "--steps", "2", "--batch-size", "2", "--width", "32", "--layers", "1", "--feedforward", "64", "--max-tokens", "64"]
             first = subprocess.run(command, capture_output=True, text=True, cwd=ROOT, timeout=60)
             self.assertEqual(first.returncode, 0, first.stderr)
+            self.assertEqual(json.loads(first.stdout.splitlines()[0])["sampleWeightMean"], 1)
             self.assertEqual(json.loads(first.stdout.splitlines()[-1])["trainedSteps"], 2)
             second = subprocess.run(command + ["--resume", str(output)], capture_output=True, text=True, cwd=ROOT, timeout=60)
             self.assertEqual(second.returncode, 0, second.stderr)
             self.assertEqual(json.loads(second.stdout.splitlines()[-1])["trainedSteps"], 4)
+
+    def test_unequal_length_games_have_equal_loss_and_gradient_contributions(self):
+        import torch
+        from neural.train import dataset_weight_mean, records, weighted_mse
+        with tempfile.TemporaryDirectory() as directory:
+            data = Path(directory) / "train.jsonl"
+            # One short game's position and three long-game positions, each
+            # game contributing a total weight of two after normalization.
+            raw = [{"position": position(), "value": math.atanh(0.5) * 1000,
+                    "gameId": game, "weight": weight}
+                   for game, weight in [("short", 2), ("long", 2 / 3), ("long", 2 / 3), ("long", 2 / 3)]]
+            data.write_text("\n".join(json.dumps(row) for row in raw) + "\n", encoding="utf-8")
+            rows = list(records(data, 64, include_weight=True))
+            mean = dataset_weight_mean(data)
+            weights = torch.tensor([row[2] / mean for row in rows])
+            targets = torch.tensor([row[1] for row in rows])
+            predictions_by_game = torch.zeros(2, requires_grad=True)
+            loss = weighted_mse(predictions_by_game[torch.tensor([0, 1, 1, 1])], targets, weights)
+            self.assertAlmostEqual(loss.item(), 0.25)
+            loss.backward()
+            torch.testing.assert_close(predictions_by_game.grad, torch.tensor([-0.5, -0.5]))
+
+            # The same per-game contribution survives batches of one; a
+            # batch-local division by sum(weights) would fail this assertion.
+            batch_one_gradients = []
+            batch_one_losses = []
+            for target, weight in zip(targets, weights):
+                prediction = torch.zeros(1, requires_grad=True)
+                item_loss = weighted_mse(prediction, target.reshape(1), weight.reshape(1))
+                item_loss.backward()
+                batch_one_losses.append(item_loss.item())
+                batch_one_gradients.append(prediction.grad.item())
+            self.assertAlmostEqual(batch_one_losses[0], sum(batch_one_losses[1:]))
+            self.assertAlmostEqual(batch_one_gradients[0], sum(batch_one_gradients[1:]), places=6)
+            self.assertAlmostEqual(sum(batch_one_losses) / len(rows), loss.item())
+
+    def test_weighted_training_cli_and_resume_use_dataset_normalization(self):
+        import torch
+        from neural.model import ModelConfig, TransformerValue, collate
+        with tempfile.TemporaryDirectory() as directory:
+            data, output = Path(directory) / "train.jsonl", Path(directory) / "model.pt"
+            rows = [{"position": position(), "value": 400, "weight": 1},
+                    {"position": position(), "value": -400, "weight": 3}]
+            data.write_text("\n".join(json.dumps(row) for row in rows) + "\n", encoding="utf-8")
+            torch.manual_seed(42)
+            model = TransformerValue(ModelConfig(width=32, heads=4, layers=1, feedforward=64, max_tokens=64, dropout=0))
+            with torch.no_grad():
+                prediction = model(*collate([encode_position(position(), 64)], torch.device("cpu"))).item()
+            expected_first_loss = 0.5 * (prediction - math.tanh(0.4)) ** 2
+            command = [sys.executable, "neural/train.py", "--data", str(data), "--output", str(output), "--device", "cpu",
+                       "--steps", "2", "--batch-size", "1", "--shuffle-buffer", "1", "--dropout", "0",
+                       "--width", "32", "--layers", "1", "--feedforward", "64", "--max-tokens", "64"]
+            first = subprocess.run(command, capture_output=True, text=True, cwd=ROOT, timeout=60)
+            self.assertEqual(first.returncode, 0, first.stderr)
+            events = [json.loads(line) for line in first.stdout.splitlines()]
+            self.assertEqual(events[0]["sampleWeightMean"], 2)
+            self.assertAlmostEqual(next(event["loss"] for event in events if event["event"] == "train"), expected_first_loss, places=6)
+            checkpoint = torch.load(output, weights_only=True)
+            self.assertEqual(checkpoint["trainedSteps"], 2)
+            self.assertEqual(checkpoint["training"]["sampleWeightMean"], 2)
+            self.assertEqual(checkpoint["training"]["lossWeighting"], "dataset-normalized sample weights")
+            # Resuming scans the current replay, not the previous dataset's mean.
+            rows[1]["weight"] = 7
+            data.write_text("\n".join(json.dumps(row) for row in rows) + "\n", encoding="utf-8")
+            second = subprocess.run(command + ["--resume", str(output)], capture_output=True, text=True, cwd=ROOT, timeout=60)
+            self.assertEqual(second.returncode, 0, second.stderr)
+            self.assertEqual(json.loads(second.stdout.splitlines()[0])["sampleWeightMean"], 4)
+            checkpoint = torch.load(output, weights_only=True)
+            self.assertEqual(checkpoint["trainedSteps"], 4)
+            self.assertEqual(checkpoint["training"]["sampleWeightMean"], 4)
 
     def test_best_output_preserves_better_resumed_baseline_and_evaluation(self):
         import torch

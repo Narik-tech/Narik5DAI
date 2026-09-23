@@ -20,6 +20,7 @@
     "transformer:train": "node scripts/transformer.js train",
     "transformer:evaluate": "node scripts/transformer.js evaluate",
     "transformer:selfplay": "node scripts/transformer-selfplay.js",
+    "transformer:selfplay:continuous": "node scripts/transformer-selfplay.js --iterations 0",
     "transformer:test": "node scripts/transformer.js test",
     "transformer:smoke": "node scripts/transformer-smoke.js"
   },

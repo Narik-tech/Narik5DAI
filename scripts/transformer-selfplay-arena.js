@@ -24,6 +24,19 @@ function certifiedFinish(game) {
   return game.result === `${winner}_WIN`;
 }
 
+function gameCompletion(games) {
+  const certifiedGames = games.filter(certifiedFinish).length;
+  const unfinishedReasons = new Map();
+  for (const game of games) {
+    if (game?.result !== 'UNFINISHED') continue;
+    const reason = game.reason ?? 'unspecified';
+    unfinishedReasons.set(reason, (unfinishedReasons.get(reason) ?? 0) + 1);
+  }
+  return { totalGames: games.length, certifiedGames,
+    gameCompletionRate: games.length ? certifiedGames / games.length : null,
+    unfinishedReasons: Object.fromEntries(unfinishedReasons) };
+}
+
 function pairDetails(pair, games) {
   if (!Array.isArray(pair.gameIndices) || pair.gameIndices.length !== 2 ||
       pair.gameIndices.some(index => !Number.isInteger(index) || index < 0 || index >= games.length)) {
@@ -52,15 +65,23 @@ export function decidePromotion({ pairs = [], games = [], minPairs = 4, promotio
   thresholds(minPairs, promotionScore);
   if (!Array.isArray(pairs) || !Array.isArray(games)) throw new Error('pairs and games must be arrays.');
   const seen = new Set(), eligible = [];
-  let duplicatePairs = 0, excludedPairs = 0;
+  let duplicatePairs = 0, excludedPairs = 0, completePairs = 0;
   for (const pair of pairs) {
     const details = pairDetails(pair, games);
+    if (details.complete) completePairs++;
     if (!details.eligible) { excludedPairs++; continue; }
     if (seen.has(pair.initialKey)) { duplicatePairs++; continue; }
     seen.add(pair.initialKey);
     eligible.push({ ...pair, ...details, complete: true });
   }
   const score = summarizePairs(eligible);
+  // These describe shared match outcomes, including unfinished and invalid games
+  // in the denominator. A color split does not attribute a stop to either engine.
+  const completion = { ...gameCompletion(games), totalPairs: pairs.length, completePairs,
+    pairCompletionRate: pairs.length ? completePairs / pairs.length : null,
+    eligiblePairs: score.pairs, eligiblePairRate: pairs.length ? score.pairs / pairs.length : null,
+    byCandidateColor: { white: gameCompletion(games.filter(game => game?.aColor === 0)),
+      black: gameCompletion(games.filter(game => game?.aColor === 1)) } };
   const invalidGames = games.filter(game => game?.valid !== true).length;
   let reason;
   if (invalidGames) reason = 'invalid-games';
@@ -72,6 +93,7 @@ export function decidePromotion({ pairs = [], games = [], minPairs = 4, promotio
     candidate: 'A', incumbent: 'B', candidateScore: score.aScore,
     candidatePoints: score.aPoints, incumbentPoints: score.bPoints,
     eligiblePairs: score.pairs, eligibleGames: score.pairs * 2, invalidGames, excludedPairs, duplicatePairs,
+    completion,
     requirement: 'At least minPairs distinct starting positions, two valid certified games with played turns per pair, and candidate score above 50% and at least promotionScore. Any invalid game vetoes promotion.',
     limitation: 'This small deterministic paired arena is an operational acceptance gate, not independent statistical evidence of general strength or an Elo estimate.' };
 }
@@ -162,6 +184,7 @@ export async function evaluateCandidate({ candidate, incumbent, suite, pairs: re
     games, pairs: paired, summary: { ...summarizeGames(games), totalPairs: paired.length,
       completePairs: paired.filter(pair => pair.complete).length,
       eligiblePairs: decision.eligiblePairs, uniqueStartingPositions: new Set(paired.map(pair => pair.initialKey)).size,
+      completion: decision.completion,
       completedPairScore: summarizePairs(paired.map(pair => ({ ...pair, complete: pair.eligible }))) }, decision,
     methodology: 'Deterministic case rotation by seed; distinct full-history starting positions only. Candidate A and incumbent B use equal limits and swapped colors. Only independently certified checkmate or stalemate finishes games. Unfinished games are not draws and neither evaluation scores nor ply limits adjudicate results. Only complete, valid, played pairs enter promotion scoring; any invalid game blocks promotion. Repeated arena selection can overfit this suite; no statistical strength guarantee.' };
 }

@@ -27,7 +27,8 @@ const defaults = {
   arenaSuite: path.join(PROJECT_ROOT, 'examples/matches/validation.json'),
 };
 
-export const help = `Usage: npm run transformer:selfplay -- [options]
+export const help = `Usage: node scripts/transformer-selfplay.js [options]
+Continuous shortcut: npm run transformer:selfplay:continuous
   --iterations N       Cycles this invocation; 0 = until Ctrl+C (default 1)
   --games N            Self-play games/cycle (8)
   --plies N            Self-play turn cap (40)
@@ -69,8 +70,11 @@ export function parseArguments(args) {
   const paths = { checkpoint: 'checkpoint', python: 'python', 'run-dir': 'runDir', 'seed-data': 'seedData', suite: 'suite', 'arena-suite': 'arenaSuite' };
   for (let i = 0; i < args.length; i++) {
     if (args[i] === '--help') { options.help = true; continue; }
+    if (!args[i].startsWith('--')) {
+      throw new Error(`Unexpected positional argument ${JSON.stringify(args[i])}. Options require --name VALUE. If npm/PowerShell stripped the option names, run directly: node scripts/transformer-selfplay.js --iterations 0 --device cuda`);
+    }
     const flag = args[i].slice(2), value = args[++i];
-    if (!args[i - 1].startsWith('--') || !value || value.startsWith('--')) throw new Error('Options require --name VALUE. Use --help.');
+    if (!value || value.startsWith('--')) throw new Error('Options require --name VALUE. Use --help.');
     if (names[flag]) options[names[flag]] = Number(value);
     else if (paths[flag]) options[paths[flag]] = value;
     else if (flag === 'device') options.device = value;

@@ -23,6 +23,13 @@ test('self-play CLI rejects malformed limits and unsafe promotion thresholds', (
   }
 });
 
+test('stripped npm option names produce actionable guidance instead of guessing positional values', () => {
+  assert.throws(() => parseArguments(['0', 'cuda']), /npm\/PowerShell.*node scripts\/transformer-selfplay\.js --iterations 0 --device cuda/);
+  const direct = parseArguments(['--iterations', '0', '--device', 'cuda']);
+  assert.equal(direct.iterations, 0);
+  assert.equal(direct.device, 'cuda');
+});
+
 test('retention cannot own active checkpoint or training input paths', () => {
   const run = path.resolve('artifacts/test-selfplay');
   for (const flag of ['--checkpoint', '--seed-data', '--suite', '--arena-suite', '--python']) {
