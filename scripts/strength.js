@@ -2,7 +2,7 @@ import { readFile } from 'node:fs/promises';
 import { resolve } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { analyze } from '../src/search.js';
-import { createPosition, formatAction, generateActions, inCheck, positionKey, validateAction } from '../src/rules.js';
+import { raw, applyMove, createPosition, formatAction, generateActions, inCheck, positionKey, validateAction } from '../src/rules.js';
 
 const fixtureRoot = new URL('../examples/tactics/', import.meta.url);
 
@@ -53,12 +53,25 @@ export function assessTactic(fixture, result, originalKey = positionKey(fixture.
   const failures = [], errors = [];
   const require = (condition, message) => { if (!condition) failures.push(message); };
   let after, verifiedMate = false;
+  function validateSearchedAction(current, action) {
+    const next = validateAction(current, action);
+    if (result.searchPolicy === 'present-spatial') {
+      for (const move of action) {
+        const [from, to] = move;
+        if (from[0] === to[0] && from[1] === to[1] && !raw.boardFuncs.present(current.board, current.action).includes(from[0])) {
+          throw new Error('Search recommended an ordinary move on an optional board.');
+        }
+        current = applyMove(current, move);
+      }
+    }
+    return next;
+  }
   try {
     if (positionKey(position) !== originalKey) throw new Error('Search changed the input position.');
-    if (result.bestAction) after = validateAction(position, result.bestAction);
+    if (result.bestAction) after = validateSearchedAction(position, result.bestAction);
     if (result.pv.length && JSON.stringify(result.pv[0]) !== JSON.stringify(result.bestAction)) throw new Error('PV does not begin with the best action.');
     let current = position;
-    for (const action of result.pv) current = validateAction(current, action);
+    for (const action of result.pv) current = validateSearchedAction(current, action);
     if (result.nodes !== result.searchNodes + result.generationNodes) throw new Error('Work counters do not sum to total nodes.');
     if (result.nodes > result.limits.maxNodes) throw new Error('Search exceeded its work limit.');
     if (expected.startsInCheck !== undefined && inCheck(position) !== expected.startsInCheck) throw new Error('Fixture has an incorrect starting check assertion.');
@@ -95,6 +108,7 @@ function deterministicRecord(result) {
     result.bestAction, result.pv, result.score, result.depth, result.effectiveQuiescenceDepth,
     result.status, result.completed, result.stoppedReason, result.nodes, result.searchNodes,
     result.generationNodes, result.qnodes, result.cutoffs, result.ttHits, result.qTtHits ?? 0,
+    result.searchPolicy, result.policyLeaves ?? 0,
   ]);
 }
 
@@ -133,6 +147,7 @@ export async function runStrengthSuite({ budgets = [1000, 10000, 50000], timeMs 
         depth: first.depth, quiescenceDepth: first.effectiveQuiescenceDepth,
         nodes: first.nodes, searchNodes: first.searchNodes, generationNodes: first.generationNodes,
         qnodes: first.qnodes, ttHits: first.ttHits, qTtHits: first.qTtHits ?? 0, cutoffs: first.cutoffs,
+        searchPolicy: first.searchPolicy ?? null, policyLeaves: first.policyLeaves ?? 0,
         status: first.status, completed: first.completed, stoppedReason: first.stoppedReason,
         score: first.score, scoreType: first.scoreType, mateIn: first.mateIn,
         action: first.bestAction, turn: first.bestAction ? formatAction(fixture.position, first.bestAction) : null,

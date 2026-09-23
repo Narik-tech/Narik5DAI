@@ -193,3 +193,21 @@ test('stale preferred turns are ignored and quiet preferences cannot enter tacti
   assert.deepEqual(ordered, baseline);
   assert.deepEqual([...generateActions(start, { preferredAction: first, tacticalOnly: true })], []);
 });
+
+test('an optional spatial advance can prepare a branch for a later temporal move', () => {
+  const first = clearBoard(); first[1][1] = 4;
+  const start = position([[first], null, [clearBoard(), clearBoard(), clearBoard()]]);
+  assert.deepEqual(raw.boardFuncs.present(start.board, start.action), [0]);
+  const advance = parseMove(start, [[2, 2, 0, 0], [2, 2, 0, 1]]);
+  const travel = parseMove(start, [[0, 0, 1, 1], [2, 2, 1, 1]]);
+  const merged = validateAction(start, [travel]);
+  const branched = validateAction(start, [advance, travel]);
+  assert.equal(merged.board[4], undefined);
+  assert.equal(branched.board[4][3][1][1], 4);
+  assert.equal(branched.board[2][3][0][1], 12);
+  assert.notEqual(positionKey(merged), positionKey(branched));
+  // This is a legality/branch-semantics safeguard, not a claim that this
+  // composed position proves a strategic win from the extra branch.
+  const expected = positionKey(branched);
+  assert([...generateActions(start)].some(action => positionKey(action.position) === expected));
+});

@@ -1,4 +1,4 @@
-import { generateActions, inCheck, positionKey } from './rules.js';
+import { createPositionKeyCache, generateActions, inCheck } from './rules.js';
 import { evaluate, pieceValue } from './evaluate.js';
 import { SearchCache } from './search-cache.js';
 
@@ -38,8 +38,9 @@ function historyKey(position, move) {
 }
 
 /**
- * Search complete submitted turns. No null move, late-move reductions, or
- * selective beam pruning: normal-depth scores have alpha-beta bound semantics.
+ * Search complete submitted turns under the requested present-spatial policy:
+ * ordinary moves from optional boards are excluded, cross-board moves remain.
+ * Alpha-beta bounds apply to that selective tree, not every legal action.
  * `nodes` includes generator work ticks, making maxNodes deterministic even
  * when finding one legal multiboard action takes considerable work.
  */
@@ -55,7 +56,10 @@ export function analyze(position, options = {}) {
   const tt = new SearchCache(maxTableEntries, Math.floor(cacheMemoryMb * 1024 * 1024));
   const history = new Map(), killers = new Map();
   const evalCache = new WeakMap(), checkCache = new WeakMap(), moveCache = new WeakMap();
+  const policyPruned = new WeakSet();
+  const keyPosition = createPositionKeyCache();
   let nodes = 0, searchNodes = 0, generationNodes = 0, qnodes = 0, ttHits = 0, qTtHits = 0, cutoffs = 0;
+  let policyLeaves = 0;
   let interruption = null, depth = 0, bestAction = null, pv = [], score = null;
   let completed = false, status = 'incomplete', rootPartial = null;
   let activeQDepth = 0, completedQDepth = 0;
@@ -108,11 +112,13 @@ export function analyze(position, options = {}) {
       return { move, priority, index };
     }).sort((a, b) => b.priority - a.priority || a.index - b.index).map(item => item.move);
   }
-  function actions(pos, preferred, ply, { spatialFirst = true, tacticalOnly = false } = {}) {
-    return generateActions(pos, {
-      tick: () => tick(), tacticalOnly, preferredAction: preferred,
+  function actions(pos, preferred, ply, { spatialFirst = true, tacticalOnly = false, restricted = true } = {}) {
+    const iterator = generateActions(pos, {
+      tick: () => tick(), tacticalOnly, preferredAction: preferred, keyPosition, skipOptionalSpatial: restricted,
+      onSkipOptionalSpatial: () => policyPruned.add(iterator),
       orderMoves: (current, moves) => orderMoves(current, moves, preferred, ply, spatialFirst),
     });
+    return iterator;
   }
   function rememberCutoff(pos, action, ply, remaining) {
     cutoffs++;
@@ -129,14 +135,33 @@ export function analyze(position, options = {}) {
     tt.store(key, entry);
   }
   function terminal(pos, ply) { return checked(pos) ? -MATE_SCORE + ply : 0; }
+  function emptyResult(pos, ply, iterator) {
+    // An exhausted traversal that excluded nothing already proves terminal.
+    if (!policyPruned.has(iterator)) return { score: terminal(pos, ply), pv: [], terminal: true };
+    // Policy exhaustion is not checkmate or stalemate. An unrestricted witness
+    // is used only to validate terminal status, never as a searched candidate
+    // or fallback action. Internally it establishes a static policy boundary.
+    const witness = actions(pos, null, ply, { restricted: false });
+    const next = witness.next();
+    witness.return?.();
+    if (next.done) return { score: terminal(pos, ply), pv: [], terminal: true };
+    policyLeaves++;
+    return { score: staticScore(pos), pv: [], policy: true };
+  }
 
   function quiescence(pos, alpha, beta, remaining, ply) {
     selectiveDepth = Math.max(selectiveDepth, ply);
     tick('quiescence');
+    // No continuation can lose before this ply or win before the next one.
+    // These are mathematical bounds, including across multiboard turns: a
+    // completed submission is one ply regardless of its component moves.
+    alpha = Math.max(alpha, -MATE_SCORE + ply);
+    beta = Math.min(beta, MATE_SCORE - ply - 1);
+    if (alpha >= beta) return { score: alpha, pv: [] };
     // Keep each tactical horizon separate: a quiet warmup is not an exact
     // result for a later pass that searches recaptures. Share the bounded table
     // with normal search, but never reuse a tactical score as a full-turn one.
-    const key = `q${remaining}:${positionKey(pos)}`, entry = tt.get(key);
+    const key = `q${remaining}:${keyPosition(pos)}`, entry = tt.get(key);
     if (entry) {
       ttHits++; qTtHits++;
       const value = fromTable(entry.score, ply);
@@ -151,11 +176,25 @@ export function analyze(position, options = {}) {
       store(key, { depth: remaining, score: toTable(value, ply), flag, pv });
       return { score: value, pv };
     }
-    let iterator = actions(pos, entry?.pv[0], ply, { spatialFirst: true });
-    const first = iterator.next();
-    // Prove at least one legal action before using stand-pat: otherwise a
+    const isCheck = remaining >= 0 && checked(pos);
+    let best = isCheck || remaining < 0 ? -INF : staticScore(pos), bestPv = [];
+    // A searched tactical action is also a witness that the position is not
+    // terminal. Reuse it instead of constructing and abandoning a separate
+    // legal turn first, which is costly when several boards must be played.
+    const tacticalOnly = remaining > 0 && !isCheck && best < beta;
+    let iterator = actions(pos, entry?.pv[0], ply, { tacticalOnly });
+    let next = iterator.next();
+    if (next.done && tacticalOnly) {
+      iterator = actions(pos, null, ply);
+      const witness = iterator.next();
+      iterator.return?.();
+      // No captures does not prove stalemate: quiet legal turns still count.
+      if (witness.done) return finish(emptyResult(pos, ply, iterator).score, [], true);
+      return finish(best);
+    }
+    // Prove at least one legal action before returning stand-pat: otherwise
     // stalemate or mate at the horizon could be mistaken for material gain.
-    if (first.done) return finish(terminal(pos, ply), [], true);
+    if (next.done) return finish(emptyResult(pos, ply, iterator).score, [], true);
     // One extra real evasion is allowed at a checked horizon. Its resulting
     // position still needs a terminal proof before static evaluation: an
     // evasion can itself deliver mate or stalemate. Do not extend check chains.
@@ -163,20 +202,9 @@ export function analyze(position, options = {}) {
       iterator.return?.();
       return finish(staticScore(pos), [], true);
     }
-    const isCheck = checked(pos);
-    let best = isCheck ? -INF : staticScore(pos), bestPv = [];
     if (!isCheck) {
       if (best >= beta || remaining <= 0) { iterator.return?.(); return finish(best, [], remaining <= 0); }
       alpha = Math.max(alpha, best);
-    }
-    let next = first;
-    if (!isCheck) {
-      // The witness above proves this is not mate/stalemate. Now enumerate
-      // only complete actions containing a capture or promotion, rather than
-      // constructing every combination of quiet moves and discarding it.
-      iterator.return?.();
-      iterator = actions(pos, entry?.pv[0], ply, { tacticalOnly: true });
-      next = iterator.next();
     }
     while (!next.done) {
       const candidate = next.value;
@@ -200,7 +228,10 @@ export function analyze(position, options = {}) {
     if (remaining <= 0) return quiescence(pos, alpha, beta, activeQDepth, ply);
     if (ply === 0) rootActionsSearched = 0;
     tick('search');
-    const key = positionKey(pos), entry = tt.get(key);
+    alpha = Math.max(alpha, -MATE_SCORE + ply);
+    beta = Math.min(beta, MATE_SCORE - ply - 1);
+    if (alpha >= beta) return { score: alpha, pv: [] };
+    const key = keyPosition(pos), entry = tt.get(key);
     if (entry && entry.depth >= remaining && entry.quiescenceDepth >= activeQDepth && ply > 0) {
       ttHits++;
       const value = fromTable(entry.score, ply);
@@ -213,7 +244,8 @@ export function analyze(position, options = {}) {
     // cutoff against a TT-tightened beta must never be stored as exact.
     const searchAlpha = alpha, searchBeta = beta;
     let best = -INF, bestPv = [], bestMove = null, count = 0;
-    for (const candidate of actions(pos, preferred || entry?.bestAction, ply)) {
+    const iterator = actions(pos, preferred || entry?.bestAction, ply);
+    for (const candidate of iterator) {
       let child;
       if (!count) child = negamax(candidate.position, remaining - 1, -beta, -alpha, ply + 1);
       else {
@@ -231,7 +263,7 @@ export function analyze(position, options = {}) {
       alpha = Math.max(alpha, value);
       if (alpha >= beta) { rememberCutoff(pos, candidate.moves, ply, remaining); break; }
     }
-    if (!count) return { score: terminal(pos, ply), pv: [], terminal: true };
+    if (!count) return emptyResult(pos, ply, iterator);
     const flag = best <= searchAlpha ? 'upper' : best >= searchBeta ? 'lower' : 'exact';
     store(key, { depth: remaining, quiescenceDepth: activeQDepth, score: toTable(best, ply), flag, bestAction: bestMove, pv: bestPv });
     return { score: best, pv: bestPv };
@@ -245,6 +277,7 @@ export function analyze(position, options = {}) {
       searchingDepth, rootActionsSearched, selectiveDepth,
       nps: elapsedMs ? Math.round(nodes * 1000 / elapsedMs) : 0, pv, status, completed,
       stoppedReason: interruption, tableEntries: tt.size, cacheMemoryBytes: tt.memoryBytes,
+      searchPolicy: 'present-spatial', policyLeaves,
       effectiveQuiescenceDepth: completed ? completedQDepth : activeQDepth,
       scoreType: score === null ? 'unavailable' : Math.abs(score) > MATE_THRESHOLD ? 'mate' : 'cp',
       mateIn: score !== null && Math.abs(score) > MATE_THRESHOLD ? Math.sign(score * rootSign) * (MATE_SCORE - Math.abs(score)) : null,
@@ -256,7 +289,9 @@ export function analyze(position, options = {}) {
     const fallback = fallbackIterator.next();
     fallbackIterator.return?.();
     if (fallback.done) {
-      score = terminal(position, 0); status = score ? 'checkmate' : 'stalemate'; completed = true;
+      const result = emptyResult(position, 0, fallbackIterator);
+      if (result.policy) interruption = 'policy';
+      else { score = result.score; status = score ? 'checkmate' : 'stalemate'; completed = true; }
       return snapshot();
     }
     bestAction = fallback.value.moves; pv = [bestAction];
@@ -275,7 +310,7 @@ export function analyze(position, options = {}) {
       searchingDepth = currentDepth;
       activeQDepth = iteration.horizon;
       rootPartial = null;
-      const window = currentDepth > 2 && Math.abs(score ?? 0) < MATE_THRESHOLD ? 60 : INF;
+      const window = currentDepth > 1 && Math.abs(score ?? 0) < MATE_THRESHOLD ? 60 : INF;
       const lower = window === INF ? -INF : score - window;
       const upper = window === INF ? INF : score + window;
       let result = negamax(position, currentDepth, lower, upper, 0, bestAction);

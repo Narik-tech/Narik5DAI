@@ -65,3 +65,17 @@ test('benchmark rejects malformed actions and does not call a shallow horizon so
   const broken = { ...result, bestAction: [[[0, 0, 0, 0], [0, 0, 3, 3]]] };
   assert.equal(assessTactic(fixture, broken).valid, false);
 });
+
+test('benchmark rejects a legal PV that violates the optional-board search policy', () => {
+  const square = () => [[12, 0, 0, 0], [0, 0, 0, 0], [0, 0, 0, 0], [0, 0, 0, 11]];
+  const position = { board: [[square()], null, [square(), square(), square()]], action: 0, promotions: [10, 9, 8, 7, 6, 5, 4, 3] };
+  const action = [[[0, 0, 0, 0], [0, 0, 0, 1]], [[2, 2, 0, 0], [2, 2, 0, 1]]];
+  validateAction(position, action); // Allowed in manual play, excluded in search.
+  const result = {
+    bestAction: action, pv: [action], nodes: 0, searchNodes: 0, generationNodes: 0,
+    limits: { maxNodes: 1000 }, status: 'ok', completed: true, searchPolicy: 'present-spatial',
+  };
+  const assessment = assessTactic({ position, expected: {} }, result);
+  assert.equal(assessment.valid, false);
+  assert.match(assessment.errors.join(' '), /ordinary move on an optional board/);
+});

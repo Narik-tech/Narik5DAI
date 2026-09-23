@@ -97,7 +97,8 @@ async function main() {
     console.log(`\n${result.notation ? `Best turn: ${result.notation}` : `Result: ${result.status}`}`);
     console.log(`White score: ${result.score === null ? 'unavailable' : result.scoreType === 'mate' ? `mate ${result.mateIn}` : (result.score / 100).toFixed(2)} | Depth: ${result.depth} | Nodes: ${result.nodes} | Time: ${Math.round(result.elapsedMs)} ms`);
     if (result.pvNotation?.length) console.log(`Variation: ${result.pvNotation.join(' / ')}`);
-    if (!result.completed) console.log('Search is incomplete; increase the budget for a deeper result.');
+    if (result.stoppedReason === 'policy') console.log('Legal turns exist, but none satisfy the optional-board search restriction.');
+    else if (!result.completed) console.log('Search is incomplete; increase the budget for a deeper result.');
     if (result.pgn) console.log(`\n${result.pgn}`);
   }
 }

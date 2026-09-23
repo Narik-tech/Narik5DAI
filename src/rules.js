@@ -256,6 +256,35 @@ export function positionKey(position) {
   return JSON.stringify([position.action % 2, position.promotions, position.board]);
 }
 
+/**
+ * Exact history keys for one immutable search. Public positions can be edited,
+ * so positionKey deliberately does not share this cache between calls/searches.
+ * Only single-board encodings are retained: sibling positions share their old
+ * boards, while caching whole history strings would multiply retained memory.
+ */
+export function createPositionKeyCache() {
+  const boards = new WeakMap();
+  return position => {
+    const timelines = [];
+    for (const timeline of position.board) {
+      if (!timeline) { timelines.push('null'); continue; }
+      const turns = [];
+      for (const board of timeline) {
+        if (!board) { turns.push('null'); continue; }
+        let serialized = boards.get(board);
+        if (serialized === undefined) {
+          serialized = JSON.stringify(board);
+          boards.set(board, serialized);
+        }
+        turns.push(serialized);
+      }
+      timelines.push(`[${turns.join(',')}]`);
+    }
+    const prefix = JSON.stringify([position.action % 2, position.promotions]);
+    return `${prefix.slice(0, -1)},[${timelines.join(',')}]]`;
+  };
+}
+
 export function formatMove(position, move) {
   return raw.pgnFuncs.fromMove(move, position.board, position.action, '', true, true, true);
 }
@@ -338,14 +367,24 @@ export function validateAction(position, moves) {
  * a leaf: the player may still move on optional boards. Individual moves may
  * expose a king temporarily; only the resulting submitted action must be safe.
  * Each move consumes at least one playable latest board, so a turn is finite.
+ * Search can omit ordinary moves on optional boards; default rule enumeration
+ * remains exhaustive. Recompute the present after every component move because
+ * time travel can change which timelines are active and required.
  */
-export function* generateActions(position, { tick = () => {}, orderMoves = (_position, moves) => moves, preferredAction = null, pruneUnsafe = true, tacticalOnly = false, cacheMoves = true } = {}) {
+export function* generateActions(position, { tick = () => {}, orderMoves = (_position, moves) => moves, preferredAction = null, pruneUnsafe = true, tacticalOnly = false, cacheMoves = true, keyPosition = positionKey, skipOptionalSpatial = false, onSkipOptionalSpatial } = {}) {
   const visited = new Set();
   const path = [];
   let initialMoves, preferredKey;
-  const availableMoves = current => cacheMoves
-    ? (initialMoves ??= pseudoMoves(position)).filter(move => current.board[move[0][0]].length - 1 === move[0][1])
-    : pseudoMoves(current);
+  const availableMoves = (current, restrict = skipOptionalSpatial) => {
+    const moves = cacheMoves
+      ? (initialMoves ??= pseudoMoves(position)).filter(move => current.board[move[0][0]].length - 1 === move[0][1])
+      : pseudoMoves(current);
+    if (!restrict) return moves;
+    const present = raw.boardFuncs.present(current.board, current.action);
+    const allowed = moves.filter(([from, to]) => from[0] !== to[0] || from[1] !== to[1] || present.includes(from[0]));
+    if (allowed.length !== moves.length) onSkipOptionalSpatial?.();
+    return allowed;
+  };
   // A preferred turn is an ordered sequence, not a set of favorite component
   // moves. Replay it before enumerating shorter legal prefixes or alternative
   // orders (which can create different branches). Validate it against current
@@ -364,13 +403,13 @@ export function* generateActions(position, { tick = () => {}, orderMoves = (_pos
       tick();
     }
     if (legal && (!tacticalOnly || tactical) && canSubmit(current)) {
-      preferredKey = positionKey(current);
+      preferredKey = keyPosition(current);
       yield { moves, position: { ...current, action: current.action + 1 } };
     }
   }
   function* visit(current, hasTacticalMove = false) {
     tick();
-    const stateKey = positionKey(current);
+    const stateKey = keyPosition(current);
     const key = (tacticalOnly && hasTacticalMove ? 't:' : '') + stateKey;
     if (visited.has(key)) return;
     visited.add(key);
@@ -393,7 +432,14 @@ export function* generateActions(position, { tick = () => {}, orderMoves = (_pos
     // source pieces and capture targets are unchanged; consuming other sources
     // cannot create a capture or promotion that is absent from this move set.
     // This skips purely quiet combinations only in capture quiescence.
-    if (tacticalOnly && !hasTacticalMove && !moves.some(move => isTacticalMove(current, move))) return;
+    if (tacticalOnly && !hasTacticalMove && !moves.some(move => isTacticalMove(current, move))) {
+      if (!skipOptionalSpatial) return;
+      // Time travel may activate a previously inactive capture source. Already
+      // active future boards cannot become present within this action: existing
+      // mover-color history stays fixed, so the present can only move earlier.
+      const active = raw.boardFuncs.active(current.board);
+      if (!availableMoves(current, false).some(move => !active.includes(move[0][0]) && isTacticalMove(current, move))) return;
+    }
     for (const move of orderMoves(current, moves)) {
       tick();
       path.push(move);

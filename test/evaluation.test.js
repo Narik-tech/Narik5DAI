@@ -84,3 +84,58 @@ test('temporal pressure and complete evaluation are color-symmetric without muta
   for (const key of Object.keys(evaluation)) assert.equal(reverse[key] || 0, -evaluation[key] || 0, key);
   assert.equal(JSON.stringify(position), original);
 });
+
+test('pawn and brawn temporal pressure matches directional royal captures for both colors', () => {
+  // Include normal and even timeline layouts, past/future pawn captures, all
+  // brawn-only capture planes, backwards moves, and the wrong half-turn color.
+  for (const piece of [1, 2, 15, 16]) {
+    for (const sourceLine of [0, 1, 2]) {
+      const source = [sourceLine, 4, 3, 3];
+      for (const [targetLine, targetTime, rank, file] of [
+        [0, 2, 3, 3], [1, 2, 3, 3], [2, 2, 3, 3], [3, 2, 3, 3],
+        [0, 6, 3, 3], [1, 6, 3, 3], [2, 6, 3, 3], [3, 6, 3, 3],
+        [0, 4, 3, 4], [1, 4, 3, 4], [2, 4, 3, 4], [3, 4, 3, 4],
+        [0, 4, 4, 3], [1, 4, 4, 3], [2, 4, 4, 3], [3, 4, 4, 3],
+        [0, 4, 2, 3], [1, 4, 2, 3], [2, 4, 2, 3], [3, 4, 2, 3],
+        [sourceLine, 2, 4, 3], [sourceLine, 2, 2, 3],
+        [sourceLine, 0, 4, 3], [sourceLine, 3, 4, 3],
+      ]) {
+        if (targetLine === sourceLine && targetTime >= 4) continue;
+        const target = [targetLine, targetTime, rank, file];
+        const position = fixture(piece, source, target);
+        if (piece % 2) {
+          position.board[sourceLine][4][7][0] = 11;
+          position.board[targetLine][targetTime][rank][file] = 12;
+        }
+        const before = JSON.stringify(position);
+        const expected = attacks(position, source, target);
+        const pressure = evaluateDetailed(position).temporal;
+        assert.equal(pressure !== 0, expected, `piece ${piece}: ${source} -> ${target}`);
+        if (expected) assert.equal(Math.sign(pressure), piece % 2 ? -1 : 1);
+        assert.equal(JSON.stringify(position), before);
+      }
+    }
+  }
+});
+
+test('integer temporal geometry agrees with rules for leapers, rays, and off-ray targets', () => {
+  const source = [0, 6, 3, 3];
+  for (const piece of [4, 6, 8, 10, 12, 14, 18, 20, 22, 24]) {
+    for (const line of [0, 1, 2, 3, 4, 5, 6]) {
+      for (const time of [0, 2, 3, 4, 6]) {
+        if (line === 0 && time === 6) continue;
+        for (const [rank, file] of [[3, 3], [3, 4], [4, 4], [5, 3], [5, 4], [5, 5]]) {
+          const target = [line, time, rank, file];
+          const intermediate = [];
+          for (let l = 0; l <= 6; l++) for (let t = 0; t <= (l === 0 ? 6 : 8); t += 2) intermediate.push([l, t]);
+          const position = fixture(piece, source, target, intermediate);
+          // A historical target cannot itself contribute counterpressure when
+          // the attacker is royal. Even snapshots keep matching-color targets
+          // in the evaluator's sample; wrong-parity targets must be ignored.
+          const expected = attacks(position, source, target);
+          assert.equal(evaluateDetailed(position).temporal > 0, expected, `piece ${piece}: ${source} -> ${target}`);
+        }
+      }
+    }
+  }
+});

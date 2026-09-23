@@ -294,14 +294,14 @@ function renderAnalysis() {
   $('stat-nps').textContent = compactNumber(result?.nps);
   $('stat-time').textContent = Number.isFinite(result?.elapsedMs) ? `${(result.elapsedMs / 1000).toFixed(1)}s` : '—';
   renderResourceStats(result);
-  const note = running && result ? `Searching depth ${result.searchingDepth ?? result.depth} · ${result.rootActionsSearched ?? 0} root turns compared` : !running && result?.stoppedReason === 'nodes' ? 'Node limit reached. Increase Max nodes to search further within your think time.' : !running && search?.result && !result.completed ? Number.isFinite(score) ? 'Partial search; no full depth completed. Allow more think time for a deeper comparison.' : 'A legal fallback is available. Allow more think time to evaluate alternatives.' : '';
+  const note = running && result ? `Searching depth ${result.searchingDepth ?? result.depth} · ${result.rootActionsSearched ?? 0} root turns compared` : !running && result?.stoppedReason === 'policy' ? 'Legal turns exist, but none satisfy the search restriction on optional boards. Play a turn manually.' : !running && result?.stoppedReason === 'nodes' ? 'Node limit reached. Increase Max nodes to search further within your think time.' : !running && search?.result && !result.completed ? Number.isFinite(score) ? 'Partial search; no full depth completed. Allow more think time for a deeper comparison.' : result.bestAction ? 'A legal fallback is available. Allow more think time to evaluate alternatives.' : 'No recommendation is available within the search limits.' : '';
   $('analysis-note').textContent = note;
   $('analysis-note').hidden = !note;
   const bestNotation = notation(result?.notation) || (Array.isArray(result?.bestAction) ? result.bestAction.length ? result.bestAction.map(raw => readableMove({raw})).join(' / ') : 'Submit the current turn' : '');
   $('best-move').textContent = bestNotation;
   $('best-move').hidden = !bestNotation;
   $('recommendation-empty').hidden = Boolean(bestNotation);
-  $('recommendation-empty').textContent = running ? 'Searching for a complete turn…' : result?.status === 'checkmate' ? 'No safe turn is available.' : result?.status === 'stalemate' ? 'No playable turn is available.' : search?.status === 'cancelled' ? 'Analysis stopped.' : 'The next possibility is waiting.';
+  $('recommendation-empty').textContent = running ? 'Searching for a complete turn…' : result?.status === 'checkmate' ? 'No safe turn is available.' : result?.status === 'stalemate' ? 'No playable turn is available.' : result?.stoppedReason === 'policy' ? 'No turn satisfies the optional-board search restriction.' : search?.status === 'cancelled' ? 'Analysis stopped.' : 'The next possibility is waiting.';
   const pv = result?.pvNotation || [];
   $('principal-variation').replaceChildren(...pv.slice(1,8).map(move => element('li','',notation(move))));
   updateControls();
