@@ -1,5 +1,6 @@
 import { generateActions, inCheck, positionKey } from './rules.js';
 import { evaluate, pieceValue } from './evaluate.js';
+import { SearchCache } from './search-cache.js';
 
 export const MATE_SCORE = 100_000;
 const MATE_THRESHOLD = MATE_SCORE - 1000;
@@ -26,6 +27,16 @@ function moveFeatures(position, move) {
   return { mover, captureValue, promotion, temporal: from[0] !== to[0] || from[1] !== to[1] };
 }
 
+function historyKey(position, move) {
+  const [from, to] = move;
+  const piece = Math.abs(position.board[from[0]]?.[from[1]]?.[from[2]]?.[from[3]] || 0);
+  // Share learned quiet-move ordering across turns and spatial timelines.
+  // Absolute half-turn numbers made the old history disappear every ply.
+  // Temporal moves keep their timeline endpoints and relative time distance.
+  const lines = from[0] === to[0] ? 's' : `${from[0]},${to[0]}`;
+  return `${piece}:${lines}:${to[1] - from[1]}:${from[2]},${from[3]}:${to[2]},${to[3]},${to[4] || 0}`;
+}
+
 /**
  * Search complete submitted turns. No null move, late-move reductions, or
  * selective beam pruning: normal-depth scores have alpha-beta bound semantics.
@@ -39,10 +50,12 @@ export function analyze(position, options = {}) {
   const maxNodes = Math.floor(finiteOption(options.maxNodes, 2_000_000, 0, 1_000_000_000));
   const qDepth = Math.floor(finiteOption(options.quiescenceDepth, 2, 0, 8));
   const maxTableEntries = Math.floor(finiteOption(options.maxTableEntries, 100_000, 0, 1_000_000));
+  const cacheMemoryMb = finiteOption(options.cacheMemoryMb, 128, 0, 4096);
   const deadline = started + timeMs;
-  const tt = new Map(), history = new Map(), killers = new Map();
-  const evalCache = new WeakMap(), checkCache = new WeakMap();
-  let nodes = 0, searchNodes = 0, generationNodes = 0, qnodes = 0, ttHits = 0, cutoffs = 0;
+  const tt = new SearchCache(maxTableEntries, Math.floor(cacheMemoryMb * 1024 * 1024));
+  const history = new Map(), killers = new Map();
+  const evalCache = new WeakMap(), checkCache = new WeakMap(), moveCache = new WeakMap();
+  let nodes = 0, searchNodes = 0, generationNodes = 0, qnodes = 0, ttHits = 0, qTtHits = 0, cutoffs = 0;
   let interruption = null, depth = 0, bestAction = null, pv = [], score = null;
   let completed = false, status = 'incomplete', rootPartial = null;
   let activeQDepth = 0, completedQDepth = 0;
@@ -70,16 +83,25 @@ export function analyze(position, options = {}) {
     if (!checkCache.has(pos)) checkCache.set(pos, inCheck(pos));
     return checkCache.get(pos);
   }
+  function orderingFeatures(pos, move) {
+    // Generated move objects are shared across partial-turn siblings. Their
+    // mover, target and coordinates cannot change within that turn; only the
+    // learned ordering bonuses below need refreshing on each visit.
+    if (!moveCache.has(move)) {
+      const from = move[0], to = move[1];
+      const centralGain = Math.abs(from[2] - 3.5) + Math.abs(from[3] - 3.5) - Math.abs(to[2] - 3.5) - Math.abs(to[3] - 3.5);
+      moveCache.set(move, { ...moveFeatures(pos, move), key: moveKey(move), history: historyKey(pos, move), centralGain });
+    }
+    return moveCache.get(move);
+  }
   function orderMoves(pos, moves, preferred, ply, spatialFirst = false) {
     const favorites = new Set((preferred || []).map(moveKey));
     const killerMoves = new Set((killers.get(ply) || []).flat().map(moveKey));
     return moves.map((move, index) => {
-      const key = moveKey(move), f = moveFeatures(pos, move);
-      const from = move[0], to = move[1];
-      const centralGain = Math.abs(from[2] - 3.5) + Math.abs(from[3] - 3.5) - Math.abs(to[2] - 3.5) - Math.abs(to[3] - 3.5);
-      let priority = (favorites.has(key) ? 10_000_000 : 0) + f.promotion * 100;
+      const f = orderingFeatures(pos, move);
+      let priority = (favorites.has(f.key) ? 10_000_000 : 0) + f.promotion * 100;
       if (f.captureValue) priority += 1_000_000 + f.captureValue * 100 - pieceValue(f.mover);
-      else priority += (killerMoves.has(key) ? 100_000 : 0) + (history.get(key) || 0) + centralGain * 10;
+      else priority += (killerMoves.has(f.key) ? 100_000 : 0) + (history.get(f.history) || 0) + f.centralGain * 10;
       // Unforced early branching expands the reply tree enormously. Explore
       // ordinary development before speculative travel unless it wins material.
       if (f.temporal) priority -= spatialFirst ? 2_000_000 : 100;
@@ -88,7 +110,7 @@ export function analyze(position, options = {}) {
   }
   function actions(pos, preferred, ply, { spatialFirst = true, tacticalOnly = false } = {}) {
     return generateActions(pos, {
-      tick: () => tick(), tacticalOnly,
+      tick: () => tick(), tacticalOnly, preferredAction: preferred,
       orderMoves: (current, moves) => orderMoves(current, moves, preferred, ply, spatialFirst),
     });
   }
@@ -99,30 +121,52 @@ export function analyze(position, options = {}) {
     const key = actionKey(action);
     killers.set(ply, [action, ...list.filter(a => actionKey(a) !== key)].slice(0, 2));
     for (const move of action) {
-      const key = moveKey(move);
+      const key = historyKey(pos, move);
       history.set(key, Math.min(50_000, (history.get(key) || 0) + remaining * remaining * 20));
     }
   }
   function store(key, entry) {
-    if (!maxTableEntries) return;
-    if (tt.size >= maxTableEntries && !tt.has(key)) tt.delete(tt.keys().next().value);
-    const old = tt.get(key);
-    if (!old || entry.depth >= old.depth || entry.flag === 'exact') tt.set(key, entry);
+    tt.store(key, entry);
   }
   function terminal(pos, ply) { return checked(pos) ? -MATE_SCORE + ply : 0; }
 
   function quiescence(pos, alpha, beta, remaining, ply) {
     selectiveDepth = Math.max(selectiveDepth, ply);
     tick('quiescence');
-    const isCheck = checked(pos);
-    let iterator = actions(pos, null, ply, { spatialFirst: true });
+    // Keep each tactical horizon separate: a quiet warmup is not an exact
+    // result for a later pass that searches recaptures. Share the bounded table
+    // with normal search, but never reuse a tactical score as a full-turn one.
+    const key = `q${remaining}:${positionKey(pos)}`, entry = tt.get(key);
+    if (entry) {
+      ttHits++; qTtHits++;
+      const value = fromTable(entry.score, ply);
+      if (entry.flag === 'exact') return { score: value, pv: entry.pv };
+      if (entry.flag === 'lower') alpha = Math.max(alpha, value);
+      else beta = Math.min(beta, value);
+      if (alpha >= beta) return { score: value, pv: entry.pv };
+    }
+    const searchAlpha = alpha, searchBeta = beta;
+    function finish(value, pv = [], exact = false) {
+      const flag = exact ? 'exact' : value <= searchAlpha ? 'upper' : value >= searchBeta ? 'lower' : 'exact';
+      store(key, { depth: remaining, score: toTable(value, ply), flag, pv });
+      return { score: value, pv };
+    }
+    let iterator = actions(pos, entry?.pv[0], ply, { spatialFirst: true });
     const first = iterator.next();
     // Prove at least one legal action before using stand-pat: otherwise a
     // stalemate or mate at the horizon could be mistaken for material gain.
-    if (first.done) return { score: terminal(pos, ply), pv: [] };
+    if (first.done) return finish(terminal(pos, ply), [], true);
+    // One extra real evasion is allowed at a checked horizon. Its resulting
+    // position still needs a terminal proof before static evaluation: an
+    // evasion can itself deliver mate or stalemate. Do not extend check chains.
+    if (remaining < 0) {
+      iterator.return?.();
+      return finish(staticScore(pos), [], true);
+    }
+    const isCheck = checked(pos);
     let best = isCheck ? -INF : staticScore(pos), bestPv = [];
     if (!isCheck) {
-      if (best >= beta || remaining <= 0) { iterator.return?.(); return { score: best, pv: [] }; }
+      if (best >= beta || remaining <= 0) { iterator.return?.(); return finish(best, [], remaining <= 0); }
       alpha = Math.max(alpha, best);
     }
     let next = first;
@@ -131,7 +175,7 @@ export function analyze(position, options = {}) {
       // only complete actions containing a capture or promotion, rather than
       // constructing every combination of quiet moves and discarding it.
       iterator.return?.();
-      iterator = actions(pos, null, ply, { tacticalOnly: true });
+      iterator = actions(pos, entry?.pv[0], ply, { tacticalOnly: true });
       next = iterator.next();
     }
     while (!next.done) {
@@ -141,16 +185,14 @@ export function analyze(position, options = {}) {
       // Stop after that evasion at the configured boundary: extending four
       // further checked turns can explode the number of boards in 5D chess
       // and consume the entire budget before normal-depth search advances.
-      const child = remaining <= 0
-        ? { score: staticScore(candidate.position), pv: [] }
-        : quiescence(candidate.position, -beta, -alpha, remaining - 1, ply + 1);
+      const child = quiescence(candidate.position, -beta, -alpha, remaining - 1, ply + 1);
       const value = -child.score;
       if (value > best) { best = value; bestPv = [candidate.moves, ...child.pv]; }
       alpha = Math.max(alpha, value);
       if (alpha >= beta) { cutoffs++; iterator.return?.(); break; }
       next = iterator.next();
     }
-    return { score: best, pv: bestPv };
+    return finish(best, bestPv);
   }
 
   function negamax(pos, remaining, alpha, beta, ply, preferred = null) {
@@ -199,14 +241,14 @@ export function analyze(position, options = {}) {
     const elapsedMs = Math.max(0, performance.now() - started);
     return {
       bestAction, score: score === null ? null : Math.round(score * rootSign), depth,
-      nodes, searchNodes, generationNodes, qnodes, ttHits, cutoffs, elapsedMs: Math.round(elapsedMs),
+      nodes, searchNodes, generationNodes, qnodes, ttHits, qTtHits, cutoffs, elapsedMs: Math.round(elapsedMs),
       searchingDepth, rootActionsSearched, selectiveDepth,
       nps: elapsedMs ? Math.round(nodes * 1000 / elapsedMs) : 0, pv, status, completed,
-      stoppedReason: interruption, tableEntries: tt.size,
+      stoppedReason: interruption, tableEntries: tt.size, cacheMemoryBytes: tt.memoryBytes,
       effectiveQuiescenceDepth: completed ? completedQDepth : activeQDepth,
       scoreType: score === null ? 'unavailable' : Math.abs(score) > MATE_THRESHOLD ? 'mate' : 'cp',
       mateIn: score !== null && Math.abs(score) > MATE_THRESHOLD ? Math.sign(score * rootSign) * (MATE_SCORE - Math.abs(score)) : null,
-      limits: { timeMs, maxDepth, maxNodes, quiescenceDepth: qDepth }
+      limits: { timeMs, maxDepth, maxNodes, quiescenceDepth: qDepth, cacheMemoryMb, maxTableEntries }
     };
   }
   try {

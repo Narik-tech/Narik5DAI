@@ -161,3 +161,35 @@ test('cached geometry matches fresh moves after an arrival makes two source boar
   assert.deepEqual(outcomes(cachedActions), outcomes(uncached));
   assert(cachedActions.some(action => positionKey(action.position) === positionKey(completed)));
 });
+
+test('a preferred full turn precedes legal prefixes without changing the exhaustive action set', () => {
+  const captureBoard = clearBoard(); captureBoard[0][1] = 4; captureBoard[1][2] = 1;
+  const start = position([[clearBoard()], null, Array.from({ length: 3 }, () => structuredClone(captureBoard))]);
+  const quiet = parseMove(start, [[0, 0, 0, 0], [0, 0, 0, 1]]);
+  const middle = applyMove(start, quiet);
+  assert(canSubmit(middle), 'the preferred action has a shorter legal prefix');
+  const capture = parseMove(middle, [[2, 2, 0, 1], [2, 2, 1, 2]]);
+  const preferredAction = [quiet, capture];
+  for (const tacticalOnly of [false, true]) {
+    const baseline = [...generateActions(start, { tacticalOnly })];
+    const ordered = [...generateActions(start, {
+      preferredAction, tacticalOnly,
+      orderMoves: (_current, moves) => moves.toReversed(),
+    })];
+    assert.deepEqual(ordered[0].moves, preferredAction);
+    const keys = actions => actions.map(action => positionKey(action.position)).sort();
+    assert.deepEqual(keys(ordered), keys(baseline));
+    assert.equal(new Set(keys(ordered)).size, ordered.length);
+    for (const action of ordered) validateAction(start, action.moves);
+  }
+});
+
+test('stale preferred turns are ignored and quiet preferences cannot enter tactical generation', () => {
+  const start = createPosition();
+  const baseline = [...generateActions(start)];
+  const first = baseline[0].moves;
+  const stale = [...first, ...first]; // The source board is already consumed.
+  const ordered = [...generateActions(start, { preferredAction: stale })];
+  assert.deepEqual(ordered, baseline);
+  assert.deepEqual([...generateActions(start, { preferredAction: first, tacticalOnly: true })], []);
+});

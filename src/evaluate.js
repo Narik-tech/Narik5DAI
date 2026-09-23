@@ -7,6 +7,13 @@ const ROYAL_TYPES = new Set([6, 10]);
 const KNIGHT_STEPS = [[1, 2], [2, 1], [-1, 2], [-2, 1], [1, -2], [2, -1], [-1, -2], [-2, -1]];
 const AXES = [[1, 0], [-1, 0], [0, 1], [0, -1]];
 const DIAGONALS = [[1, 1], [1, -1], [-1, 1], [-1, -1]];
+// Keep variant-piece geometry in sync with the rules library. These profiles
+// describe attacks only: king safety and complete-turn legality remain search's
+// responsibility, and pawns/brawns have separate directional capture rules.
+const TEMPORAL_MOVEMENT = Array.from({ length: PIECE_VALUES.length }, (_, type) => ({
+  steps: new Set(raw.pieceFuncs.movePos(type * 2).filter(v => v[0] || v[1]).map(v => v.join(','))),
+  rays: new Set(raw.pieceFuncs.moveVecs(type * 2).filter(v => v[0] || v[1]).map(v => v.join(','))),
+}));
 
 export function pieceValue(piece) {
   return PIECE_VALUES[Math.ceil(Math.abs(piece || 0) / 2)] || 0;
@@ -17,6 +24,30 @@ function signFor(color) { return color === 0 ? 1 : -1; }
 function timelineCoordinate(index, even) {
   const value = index % 2 ? -(index + 1) / 2 : index / 2;
   return even && value > 0 ? value - 1 : value;
+}
+
+function temporalAttack(board, attacker, king, even) {
+  // Half-turn boards of different colors cannot be connected by a move.
+  if ((attacker.t - king.t) % 2) return false;
+  const delta = [
+    timelineCoordinate(king.l, even) - timelineCoordinate(attacker.l, even),
+    (king.t - attacker.t) / 2,
+    king.r - attacker.r, king.f - attacker.f,
+  ];
+  const movement = TEMPORAL_MOVEMENT[attacker.type];
+  if (movement.steps.has(delta.join(','))) return true;
+  const distance = Math.max(...delta.map(Math.abs));
+  if (!distance || !movement.rays.size) return false;
+  const step = delta.map(value => value / distance);
+  if (!movement.rays.has(step.join(','))) return false;
+  for (let offset = 1; offset < distance; offset++) {
+    const line = raw.pieceFuncs.timelineMove(attacker.l, step[0] * offset, even);
+    const square = board[line]?.[attacker.t + step[1] * offset * 2]?.[attacker.r + step[2] * offset]?.[attacker.f + step[3] * offset];
+    // Rays stop at occupied squares and at gaps in the multiverse. Leapers,
+    // checked above, do not require intermediate boards or squares to exist.
+    if (square !== 0) return false;
+  }
+  return true;
 }
 
 function spatialActivity(board, r, f, type, color) {
@@ -67,7 +98,7 @@ export function evaluateDetailed(position) {
         if ([2, 3, 4, 5, 7].includes(type)) phase += pieceValue(piece);
         if (type === 1 || type === 8) pawns[color].push(entry);
         if (ROYAL_TYPES.has(type)) { kings.push(entry); royals.push(entry); }
-        else if (type > 1 && type !== 8) attackers.push(entry);
+        if (type > 1 && type !== 8) attackers.push(entry);
       }
     }
     const middleGame = Math.min(1, phase / 6000);
@@ -127,28 +158,14 @@ export function evaluateDetailed(position) {
   // would hide that weakness as more timelines are created.
   totals.kingSafety += (worstKing[1] - worstKing[0]) * 0.45;
 
-  // A small geometric pressure term measures potential L/T lines between the
-  // frontier and royal pieces. It is a heuristic, not a legality/check test.
+  // Reward unobstructed temporal attacks, including those by royal and fairy
+  // pieces. This remains potential pressure, not a complete-turn check test.
   const pressure = [0, 0];
   for (const attacker of attackers) {
     let best = 0;
     for (const king of royals) {
       if (king.color === attacker.color || (king.l === attacker.l && king.t === attacker.t)) continue;
-      const delta = [
-        Math.abs(timelineCoordinate(attacker.l, even) - timelineCoordinate(king.l, even)),
-        Math.abs(attacker.t - king.t) / 2,
-        Math.abs(attacker.r - king.r), Math.abs(attacker.f - king.f)
-      ].filter(Boolean).sort((a, b) => a - b);
-      const dimensions = delta.length;
-      const ray = dimensions && delta.every(v => v === delta[0]);
-      const matches = attacker.type === 5 || attacker.type === 10 ? ray
-        : attacker.type === 4 ? ray && dimensions === 1
-        : attacker.type === 2 ? ray && dimensions === 2
-        : attacker.type === 7 ? ray && dimensions <= 2
-        : attacker.type === 11 ? ray && dimensions === 3
-        : attacker.type === 12 ? ray && dimensions === 4
-        : attacker.type === 3 ? dimensions === 2 && delta[0] === 1 && delta[1] === 2 : false;
-      if (matches) best = Math.max(best, 20 * Math.min(attacker.weight, king.weight));
+      if (temporalAttack(board, attacker, king, even)) best = Math.max(best, 20 * Math.min(attacker.weight, king.weight));
     }
     pressure[attacker.color] += best;
   }

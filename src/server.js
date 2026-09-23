@@ -14,7 +14,8 @@ const staticFiles = new Map([
 
 function numericOption(value, fallback, min, max, name) {
   const number = value === undefined ? fallback : Number(value);
-  if (!Number.isFinite(number) || !Number.isInteger(number) || number < min || number > max) {
+  const validType = value === undefined || typeof value === 'number' || (typeof value === 'string' && value.trim() !== '');
+  if (!validType || !Number.isFinite(number) || !Number.isInteger(number) || number < min || number > max) {
     throw new Error(`${name} must be an integer between ${min} and ${max}.`);
   }
   return number;
@@ -117,7 +118,9 @@ export function createApp() {
           const options = {
             timeMs: numericOption(body.timeMs, 3000, 50, 120000, 'Think time'),
             maxDepth: numericOption(body.maxDepth, 8, 1, 16, 'Depth'),
-            maxNodes: numericOption(body.maxNodes, 2000000, 1, 50000000, 'Node budget'),
+            maxNodes: numericOption(body.maxNodes, 2000000, 1, 1000000000, 'Node budget'),
+            cacheMemoryMb: numericOption(body.cacheMemoryMb, 128, 0, 4096, 'Cache memory'),
+            maxTableEntries: 1000000,
             quiescenceDepth: numericOption(body.quiescenceDepth, 2, 0, 6, 'Quiescence depth'),
           };
           stopJobs();

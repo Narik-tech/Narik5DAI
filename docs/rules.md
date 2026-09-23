@@ -20,7 +20,9 @@ Action generation prunes a partial turn when an actual opponent move can already
 
 During nonchecked capture quiescence, the engine separately proves that at least one legal turn exists, then generates only turns containing a capture or promotion. It skips a quiet partial path when no remaining source has a capture or promotion: the remaining mover-color snapshots cannot change to create one. This filtering is not applied to normal-depth search or check evasions.
 
-Quiescence search is a finite tactical extension, not a proof that a position is tactically quiet. At its emergency check-sequence limit it evaluates a legal evasion instead of continuing indefinitely; tactics beyond that horizon may be missed. Heuristic evaluation is kept outside the search's reserved mate-score range.
+Quiescence search is a finite tactical extension, not a proof that a position is tactically quiet. At its emergency check-sequence limit it evaluates a legal evasion instead of continuing indefinitely. The resulting position is still checked for a legal-action witness: a mating or stalemating evasion receives its terminal score. Longer tactics may be missed. Heuristic evaluation is kept outside the search's reserved mate-score range.
+
+Preferred turns are replayed in their exact component order before general enumeration. Replay checks move geometry and submission legality, and duplicate suppression removes only the repeated result, preserving optional continuations. Quiet-move ordering history omits absolute half-turn numbers so successful moves can guide later plies. Tactical transposition entries use separate keys for each remaining horizon, normalize mate distances, and classify bounds against the actual searched window. They share the normal table's entry limit and never substitute for a full-turn search result.
 
 ## Primary sources consulted
 

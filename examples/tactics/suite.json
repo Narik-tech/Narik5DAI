@@ -1,0 +1,74 @@
+{
+  "version": 1,
+  "description": "Curated tactical and full-turn regression diagnostics; not an Elo estimate or an independent playing-strength rating.",
+  "cases": [
+    {
+      "id": "white-queen", "title": "White captures a hanging queen", "category": "material", "file": "white-queen.5dpgn",
+      "limits": { "maxDepth": 3, "quiescenceDepth": 2, "maxNodes": 20000 },
+      "expected": { "action": [[[0,0,1,0],[0,0,1,2]]], "minDepth": 2, "minQuiescenceDepth": 1, "scoreSign": 1 }
+    },
+    {
+      "id": "black-queen", "title": "Black captures a hanging queen", "category": "material", "file": "black-queen.5dpgn",
+      "limits": { "maxDepth": 3, "quiescenceDepth": 2, "maxNodes": 20000 },
+      "expected": { "action": [[[0,1,2,0],[0,1,2,2]]], "minDepth": 2, "minQuiescenceDepth": 1, "scoreSign": -1 }
+    },
+    {
+      "id": "dual-queens", "title": "Capture both queens in one submitted turn", "category": "full-turn", "file": "dual-queens.5dpgn",
+      "limits": { "maxDepth": 2, "quiescenceDepth": 1, "maxNodes": 50000 },
+      "expected": { "action": [[[0,0,1,0],[0,0,1,2]],[[2,0,1,0],[2,0,1,2]]], "minDepth": 2, "minQuiescenceDepth": 1, "scoreSign": 1 }
+    },
+    {
+      "id": "dual-evasion", "title": "Evacuate both checked kings before submitting", "category": "full-turn", "file": "dual-evasion.5dpgn",
+      "limits": { "maxDepth": 2, "quiescenceDepth": 1, "maxNodes": 50000 },
+      "expected": {
+        "allowedActions": [
+          [[[0,0,0,0],[0,0,0,1]],[[2,0,0,0],[2,0,0,1]]],
+          [[[0,0,0,0],[0,0,0,1]],[[2,0,0,0],[2,0,1,1]]],
+          [[[0,0,0,0],[0,0,1,1]],[[2,0,0,0],[2,0,0,1]]],
+          [[[0,0,0,0],[0,0,1,1]],[[2,0,0,0],[2,0,1,1]]]
+        ],
+        "minDepth": 2, "minQuiescenceDepth": 1, "startsInCheck": true
+      }
+    },
+    {
+      "id": "temporal-knight-mate", "title": "Backward knight capture creates a mating branch", "category": "mate", "file": "temporal-knight-mate.5dpgn",
+      "limits": { "maxDepth": 2, "quiescenceDepth": 1, "maxNodes": 5000 },
+      "expected": { "action": [[[0,2,1,1],[0,0,3,1]]], "minDepth": 1, "mateIn": 1, "temporal": true }
+    },
+    {
+      "id": "knight-underpromotion", "title": "Only knight promotion mates immediately", "category": "mate", "file": "knight-underpromotion.5dpgn",
+      "limits": { "maxDepth": 2, "quiescenceDepth": 1, "maxNodes": 5000 },
+      "expected": { "action": [[[0,0,2,1],[0,0,3,1,6]]], "minDepth": 1, "mateIn": 1 }
+    },
+    {
+      "id": "poisoned-pawn", "title": "Avoid Nxe5 after considering the recapture", "category": "horizon", "file": "poisoned-pawn.5dpgn",
+      "limits": { "maxDepth": 2, "quiescenceDepth": 1, "maxNodes": 50000 },
+      "expected": { "forbiddenMoves": [[[0,4,2,5],[0,4,4,4]]], "minDepth": 1, "minQuiescenceDepth": 1 }
+    },
+    {
+      "id": "temporal-queen-mate", "title": "Qh5 mates through the temporal king threat", "category": "mate", "file": "temporal-queen-mate.5dpgn",
+      "limits": { "maxDepth": 2, "quiescenceDepth": 1, "maxNodes": 5000 },
+      "expected": { "action": [[[0,4,1,4],[0,4,4,7]]], "minDepth": 1, "mateIn": 1 }
+    },
+    {
+      "id": "evasion-mate", "title": "Recognize forced mate after checked-horizon evasions", "category": "horizon", "file": "evasion-mate.5dpgn",
+      "limits": { "maxDepth": 1, "quiescenceDepth": 0, "maxNodes": 10000 },
+      "expected": { "minDepth": 1, "mateIn": -2, "scoreSign": -1 }
+    },
+    {
+      "id": "locked-king", "title": "Resolve the locked-king puzzle at depth three", "category": "horizon", "file": "locked-king.5dpgn",
+      "limits": { "maxDepth": 3, "quiescenceDepth": 2, "maxNodes": 20000 },
+      "expected": { "action": [[[0,0,1,7],[0,0,0,6]]], "minDepth": 3, "minQuiescenceDepth": 2 }
+    },
+    {
+      "id": "checkmate", "title": "Prove no complete legal reply in check", "category": "terminal", "file": "checkmate.5dpgn",
+      "limits": { "maxDepth": 1, "quiescenceDepth": 0, "maxNodes": 5000 },
+      "expected": { "status": "checkmate", "scoreSign": 1 }
+    },
+    {
+      "id": "stalemate", "title": "Distinguish stalemate from checkmate", "category": "terminal", "file": "stalemate.5dpgn",
+      "limits": { "maxDepth": 1, "quiescenceDepth": 0, "maxNodes": 5000 },
+      "expected": { "status": "stalemate", "scoreSign": 0 }
+    }
+  ]
+}

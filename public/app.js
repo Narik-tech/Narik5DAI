@@ -12,6 +12,29 @@ let autoTimer = null;
 let autoRevision = null;
 let initialPosition = true;
 let boardSize = Number($('board-size').value);
+const searchSettingsKey = 'vibe-d-ai.search-settings.v1';
+const searchSettingIds = ['time-budget', 'search-depth', 'node-budget', 'cache-memory'];
+
+function restoreSearchSettings() {
+  try {
+    const saved = JSON.parse(localStorage.getItem(searchSettingsKey));
+    for (const id of searchSettingIds) {
+      const input = $(id), value = saved?.[id];
+      if (value === undefined || value === null) continue;
+      if (input.tagName === 'SELECT') {
+        if ([...input.options].some(option => option.value === String(value))) input.value = String(value);
+      } else if ((typeof value === 'number' || (typeof value === 'string' && value.trim() !== '')) && Number.isInteger(Number(value)) && Number(value) >= Number(input.min) && Number(value) <= Number(input.max)) {
+        input.value = String(Number(value));
+      }
+    }
+  } catch { /* Unavailable storage or old settings must not prevent play. */ }
+}
+function saveSearchSettings() {
+  if (!$('node-budget').validity.valid) return;
+  try {
+    localStorage.setItem(searchSettingsKey, JSON.stringify(Object.fromEntries(searchSettingIds.map(id => [id, $(id).value]))));
+  } catch { /* Settings still apply to this session if storage is unavailable. */ }
+}
 
 function element(tag, className, text) {
   const el = document.createElement(tag);
@@ -60,8 +83,7 @@ function updateControls() {
   $('import-pgn').disabled = busy;
   $('variant').disabled = busy;
   $('ai-side').disabled = busy;
-  $('time-budget').disabled = running;
-  $('search-depth').disabled = running;
+  for (const id of searchSettingIds) $(id).disabled = busy || running;
 }
 function receiveGame(next) {
   game = next;
@@ -247,6 +269,14 @@ async function changeGame(path, payload, after) {
 }
 async function playMove(move) { await changeGame('/api/move',{move:move.raw,revision:game.revision}); }
 function compactNumber(value) { return Number.isFinite(value) ? Intl.NumberFormat('en',{notation:'compact',maximumFractionDigits:1}).format(value) : '—'; }
+function renderResourceStats(result) {
+  const maxNodes = result?.limits?.maxNodes ?? Number($('node-budget').value);
+  const cacheMb = result?.limits?.cacheMemoryMb ?? Number($('cache-memory').value);
+  const usedMb = Number.isFinite(result?.cacheMemoryBytes) ? (result.cacheMemoryBytes / 1048576).toFixed(1) : null;
+  $('stat-node-budget').textContent = `Max nodes: ${compactNumber(maxNodes)}`;
+  $('stat-cache').textContent = cacheMb === 0 ? 'Cache: off' : `Cache: ${usedMb === null ? '—' : `≈${usedMb}`} / ${cacheMb} MiB`;
+  $('stat-cache').title = 'Estimated retained search-cache memory; not total process RAM or GPU VRAM.';
+}
 function renderAnalysis() {
   const result = search?.result || search?.progress;
   const running = search?.status === 'running';
@@ -260,9 +290,11 @@ function renderAnalysis() {
   $('stat-depth').textContent = result?.depth ?? '—';
   $('stat-depth').title = result ? `Completed full-turn depth: ${result.depth ?? 0}. Deepest visited turn: ${result.selectiveDepth ?? result.depth ?? 0}. Capture extension depth: ${result.effectiveQuiescenceDepth ?? 0}.` : 'Deepest fully completed full-turn search';
   $('stat-nodes').textContent = compactNumber(result?.nodes);
+  $('stat-nodes').title = result ? `${(result.nodes ?? 0).toLocaleString()} search and generation work nodes` : 'Search and generation work nodes';
   $('stat-nps').textContent = compactNumber(result?.nps);
   $('stat-time').textContent = Number.isFinite(result?.elapsedMs) ? `${(result.elapsedMs / 1000).toFixed(1)}s` : '—';
-  const note = running && result ? `Searching depth ${result.searchingDepth ?? result.depth} · ${result.rootActionsSearched ?? 0} root turns compared` : !running && search?.result && !result.completed ? Number.isFinite(score) ? 'Partial search; no full depth completed. Allow more think time for a deeper comparison.' : 'A legal fallback is available. Allow more think time to evaluate alternatives.' : '';
+  renderResourceStats(result);
+  const note = running && result ? `Searching depth ${result.searchingDepth ?? result.depth} · ${result.rootActionsSearched ?? 0} root turns compared` : !running && result?.stoppedReason === 'nodes' ? 'Node limit reached. Increase Max nodes to search further within your think time.' : !running && search?.result && !result.completed ? Number.isFinite(score) ? 'Partial search; no full depth completed. Allow more think time for a deeper comparison.' : 'A legal fallback is available. Allow more think time to evaluate alternatives.' : '';
   $('analysis-note').textContent = note;
   $('analysis-note').hidden = !note;
   const bestNotation = notation(result?.notation) || (Array.isArray(result?.bestAction) ? result.bestAction.length ? result.bestAction.map(raw => readableMove({raw})).join(' / ') : 'Submit the current turn' : '');
@@ -276,10 +308,16 @@ function renderAnalysis() {
 }
 async function startAnalysis(autoPlay = false) {
   if (busy || !game || search?.status === 'running') return;
+  if (!$('node-budget').reportValidity()) { if (autoPlay) autoRevision = null; return; }
+  const options = {
+    timeMs: Number($('time-budget').value), maxDepth: Number($('search-depth').value),
+    maxNodes: Number($('node-budget').value), cacheMemoryMb: Number($('cache-memory').value),
+  };
+  saveSearchSettings();
   const revision = game.revision;
   setBusy(true);
   try {
-    const data = await api('/api/analyze',{timeMs:Number($('time-budget').value),maxDepth:Number($('search-depth').value)});
+    const data = await api('/api/analyze', options);
     search = {id:data.jobId,revision,status:'running',result:null,progress:null,autoPlay};
     renderAnalysis();
     pollTimer = setTimeout(pollAnalysis,120);
@@ -327,6 +365,11 @@ function scheduleOpponent() {
 }
 
 $('orientation').addEventListener('change',renderBoards);
+for (const id of searchSettingIds) $(id).addEventListener('change', () => {
+  saveSearchSettings();
+  renderResourceStats(search?.result || search?.progress);
+  scheduleOpponent();
+});
 $('show-history').addEventListener('change',() => { renderBoards(); scrollToPresent(); });
 $('board-size').addEventListener('input',() => { boardSize = Number($('board-size').value); renderBoards(); });
 $('submit-button').addEventListener('click',() => { if (game?.canSubmit) changeGame('/api/submit',{revision:game.revision},scrollToPresent); });
@@ -359,6 +402,8 @@ document.addEventListener('keydown',(event) => {
 window.addEventListener('resize',positionPresentLine);
 for (const dialog of document.querySelectorAll('dialog')) dialog.addEventListener('click',(event) => { if (event.target === dialog) { const rect = dialog.getBoundingClientRect(); if (event.clientX < rect.left || event.clientX > rect.right || event.clientY < rect.top || event.clientY > rect.bottom) dialog.close(); } });
 if (window.innerWidth < 570) { boardSize = 34; $('board-size').value = '34'; }
+restoreSearchSettings();
+renderResourceStats();
 try { receiveGame(await api('/api/game')); }
 catch (error) {
   $('connection').textContent = 'Engine unavailable';

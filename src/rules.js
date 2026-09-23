@@ -211,11 +211,27 @@ export function applyMove(position, move) {
 }
 
 function attackedByNextPlayer(position) {
-  const moves = raw.boardFuncs.moves(position.board, position.action + 1, false, false, false, position.promotions);
-  return moves.some(move => {
-    const target = pieceAt(position.board, move[1]);
-    return royal(target) && Math.abs(target) % 2 === position.action % 2;
-  });
+  const { board } = position, nextPlayer = (position.action + 1) % 2;
+  // Match upstream's unrestricted frontier source selection, including
+  // inactive timelines. Stop at the first royal capture instead of building
+  // the entire opponent move list; piece geometry stays upstream's authority.
+  for (let l = 0; l < board.length; l++) {
+    const timeline = board[l];
+    if (!timeline || (timeline.length - 1) % 2 !== nextPlayer) continue;
+    const t = timeline.length - 1, squares = timeline[t];
+    for (let r = 0; squares && r < squares.length; r++) {
+      for (let f = 0; squares[r] && f < squares[r].length; f++) {
+        const piece = Math.abs(squares[r][f]);
+        if (!piece || piece % 2 !== nextPlayer) continue;
+        const moves = raw.pieceFuncs.moves(board, [l, t, r, f], false, position.promotions);
+        for (const move of moves) {
+          const target = pieceAt(board, move[1]);
+          if (royal(target) && Math.abs(target) % 2 === position.action % 2) return true;
+        }
+      }
+    }
+  }
+  return false;
 }
 
 export function canSubmit(position) {
@@ -323,13 +339,39 @@ export function validateAction(position, moves) {
  * expose a king temporarily; only the resulting submitted action must be safe.
  * Each move consumes at least one playable latest board, so a turn is finite.
  */
-export function* generateActions(position, { tick = () => {}, orderMoves = (_position, moves) => moves, pruneUnsafe = true, tacticalOnly = false, cacheMoves = true } = {}) {
+export function* generateActions(position, { tick = () => {}, orderMoves = (_position, moves) => moves, preferredAction = null, pruneUnsafe = true, tacticalOnly = false, cacheMoves = true } = {}) {
   const visited = new Set();
   const path = [];
-  let initialMoves;
+  let initialMoves, preferredKey;
+  const availableMoves = current => cacheMoves
+    ? (initialMoves ??= pseudoMoves(position)).filter(move => current.board[move[0][0]].length - 1 === move[0][1])
+    : pseudoMoves(current);
+  // A preferred turn is an ordered sequence, not a set of favorite component
+  // moves. Replay it before enumerating shorter legal prefixes or alternative
+  // orders (which can create different branches). Validate it against current
+  // geometry so a stale/illegal hint never becomes a playable action.
+  if (Array.isArray(preferredAction)) {
+    tick();
+    let current = position, legal = true, tactical = false;
+    const moves = [];
+    for (const preferred of preferredAction) {
+      tick();
+      const move = availableMoves(current).find(candidate => equalMove(candidate, preferred));
+      if (!move) { legal = false; break; }
+      tactical ||= isTacticalMove(current, move);
+      moves.push(move);
+      current = applyMove(current, move);
+      tick();
+    }
+    if (legal && (!tacticalOnly || tactical) && canSubmit(current)) {
+      preferredKey = positionKey(current);
+      yield { moves, position: { ...current, action: current.action + 1 } };
+    }
+  }
   function* visit(current, hasTacticalMove = false) {
     tick();
-    const key = (tacticalOnly && hasTacticalMove ? 't:' : '') + positionKey(current);
+    const stateKey = positionKey(current);
+    const key = (tacticalOnly && hasTacticalMove ? 't:' : '') + stateKey;
     if (visited.has(key)) return;
     visited.add(key);
     // Moves in this action originate and land on mover-color boards. An attack
@@ -339,16 +381,14 @@ export function* generateActions(position, { tick = () => {}, orderMoves = (_pos
     // phantom forced-pass check, which other component moves can still resolve.
     const unsafe = attackedByNextPlayer(current);
     if (pruneUnsafe && unsafe) return;
-    if ((!tacticalOnly || hasTacticalMove) && !unsafe && raw.boardFuncs.present(current.board, current.action).length === 0) {
+    if (stateKey !== preferredKey && (!tacticalOnly || hasTacticalMove) && !unsafe && raw.boardFuncs.present(current.board, current.action).length === 0) {
       yield { moves: path.slice(), position: { ...current, action: current.action + 1 } };
     }
     // Every move consumes existing mover-color sources and creates only
     // opponent-color boards. Geometry, unmoved flags, and en-passant history
     // on every remaining source therefore stay fixed throughout this action.
     // A destination becoming historical changes branching, not its geometry.
-    const moves = cacheMoves
-      ? (initialMoves ??= pseudoMoves(position)).filter(move => current.board[move[0][0]].length - 1 === move[0][1])
-      : pseudoMoves(current);
+    const moves = availableMoves(current);
     // No mover-color board is added or changed within an action. Remaining
     // source pieces and capture targets are unchanged; consuming other sources
     // cannot create a capture or promotion that is absent from this move set.

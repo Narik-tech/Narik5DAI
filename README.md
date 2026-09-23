@@ -2,7 +2,7 @@
 
 A local analysis and play workbench, command-line engine, and JavaScript library for **5D Chess with Multiverse Time Travel**.
 
-The engine searches **complete submitted turns**, including turns that require moves on several timelines. It uses iterative deepening, principal variation alpha-beta search, transposition caching, capture/promotion quiescence, and a multiverse evaluation. The rules layer supports historical travel, branching, inactive timelines, castling, en passant, promotions, and the variant pieces supported by the pinned rules dependency.
+The engine searches **complete submitted turns**, including turns that require moves on several timelines. It uses iterative deepening, principal variation alpha-beta search, full-turn move ordering, transposition caching in both normal and tactical search, capture/promotion quiescence, and a multiverse evaluation. The rules layer supports historical travel, branching, inactive timelines, castling, en passant, promotions, and the variant pieces supported by the pinned rules dependency.
 
 This is a working classical search engine, not a trained neural model. It has **no established Elo or claim to be the world's strongest 5D engine**. The search budget, completed depth, principal variation, and incomplete results are visible so its behavior can be measured and improved.
 
@@ -16,6 +16,10 @@ npm start
 ```
 
 Open **http://127.0.0.1:5173**. Everything runs on your computer. No API key, cloud service, account, or GPU is required. Set `PORT` to use a different local port.
+
+The Engine panel includes **Max nodes** (1–1,000,000,000) and **Search cache (RAM)** (Off or 16 MiB–4 GiB), alongside think time and depth. Settings are saved in your browser and apply to analysis and automatic engine replies. Search stops at the time, node, or depth limit; reaching the node limit is shown below the results. A full cache evicts old entries while search continues.
+
+This CPU engine does not allocate GPU VRAM. The cache control caps estimated RAM retained for saved search results, including full position-history keys and move arrays; total process memory is higher. The selected amount is a budget, not an up-front allocation. Results display estimated cache usage against that budget. Choose Off to disable the cache.
 
 Select a piece on a playable board, then a highlighted destination on any board. A time-travel move can create a new timeline. Continue until the turn can be submitted, then choose **Submit turn**. **Analyze** recommends an entire remaining turn; **Play best** applies it and submits. The opponent selector enables automatic engine replies. Undo removes one pending move, or a whole submitted turn when no moves are pending.
 
@@ -46,6 +50,7 @@ const result = analyze(position, {
   maxDepth: 8,
   maxNodes: 2_000_000,
   quiescenceDepth: 2,
+  cacheMemoryMb: 128, // MiB of estimated search-cache RAM; 0 disables the cache
   onProgress: info => console.log(info.depth, info.score),
 });
 if (result.bestAction !== null) {
@@ -60,10 +65,15 @@ if (result.bestAction !== null) {
 ```sh
 npm test
 npm run benchmark
+npm run strength -- --nodes 50000 --repeat 2 --strict
 npm run selfplay
 ```
 
 Tests cover temporal geometry, history immutability, present shifting, complete-turn legality, optional inactive boards, tactical search, interruption, game export/import, and HTTP integration. The benchmark reports local throughput and verifies returned actions. Self-play is a diagnostic and stops at a turn limit; it does not assign an Elo or count an unfinished game as a draw.
+
+The tactical suite in `examples/tactics/` measures captures for both colors, coordinated multi-board captures and evasions, temporal mates, knight underpromotion, defended captures, and terminal positions. `npm run strength -- --nodes 1000,5000,20000,50000 --repeat 2 --json` reports results at fixed work budgets. Each run validates the full principal variation and checks that the input history is unchanged; repeats check deterministic search results. `--strict` exits with failure if a selected case is unsolved or invalid. Use `--case ID` to inspect one case and `--engine PATH` to compare an earlier compatible search module. These are curated regressions, not an independent rating.
+
+Search now retains the exact order of a preferred full turn, including optional moves after a legal submission. Quiet-move history transfers across half-turns, so useful ordering survives as the search deepens. Tactical cache entries are isolated by horizon and share the configured table-size limit; `qTtHits` reports their reuse. The checked-horizon boundary also verifies whether an evasion itself ends the game before assigning a static score.
 
 The locked-king puzzle in `examples/locked-king.5dpgn` is a performance regression: depth three with two capture-extension plies must complete within 20,000 search/generation work nodes. The original search stalled at depth one because it explored already-lost partial turns and lengthy sequences of checks at the tactical horizon. Search now rejects irreversible royal attacks early, reuses unchanged move geometry within a turn, and directly generates tactical actions during quiescence. The app reports live work counts and the depth currently being searched separately from completed depth.
 
@@ -74,11 +84,11 @@ For longer diagnostics, set `BENCH_TIME_MS`, `SELFPLAY_TIME_MS`, or `SELFPLAY_PL
 - **Immutable history:** search shares unchanged past boards, but position keys include all history. Identical current boards with different pasts are different positions.
 - **Legal complete turns:** move generation is lazy and deduplicates equivalent partial states. A king may be exposed during a partial turn; every king must be safe on submission. The search includes optional moves even after the present has shifted.
 - **No false mate from a timer:** mate/stalemate is classified only after exhaustive legal-action enumeration. The upstream eager action enumerator and timeout-based mate getters are bypassed.
-- **Evaluation:** weighted frontier material, development, mobility, pawn structure, king exposure, temporal geometry, and weaknesses across timelines. Historical material is not repeatedly counted. Weights are hand tuned and not statistically calibrated.
-- **Search:** no beam cap or chess null-move assumption in normal-depth search. Spatial continuations are ordered before unforced timeline branching; this changes order, not the set of legal turns. Quiescence searches captures/promotions up to its configured limit. If checked at that limit, it evaluates actual legal evasions for one further turn instead of standing still in check. This finite horizon can miss longer tactics. Time budgets can expire before depth one on a large multiverse.
+- **Evaluation:** weighted frontier material, development, mobility, pawn structure, king exposure, temporal pressure, and weaknesses across timelines. Temporal pressure follows the pinned movement vectors, including royal and fairy pieces, respects historical blockers and missing boards, and connects only matching half-turn colors. Historical material is not repeatedly counted. It samples six past royal snapshots; pawn/brawn temporal pressure remains unmodeled. Weights are hand tuned and not statistically calibrated.
+- **Search:** no beam cap or chess null-move assumption in normal-depth search. Spatial continuations are ordered before unforced timeline branching; this changes order, not the set of legal turns. Quiescence searches captures/promotions up to its configured limit. If checked at that limit, it evaluates actual legal evasions for one further turn, including terminal detection after the evasion. This finite horizon can miss longer tactics. Time budgets can expire before depth one on a large multiverse.
 - **Compatibility:** the pinned community rules implementation is not an official Thunkspace engine. Regression coverage is substantial but cannot certify every Steam variant. There is no live Steam integration, opening book, tablebase, repetition adjudication, learned policy, or distributed search.
 
-For stronger play, the next measurable work is a larger 5D tactical suite and paired engine matches, then profile-guided optimization and evaluation tuning. More search time is useful, but no finite setting guarantees optimal play.
+For further strength measurement, expand the tactical suite and run paired engine matches before tuning evaluation weights. More search time is useful, but no finite setting guarantees optimal play.
 
 ## Sources and license
 

@@ -11,6 +11,7 @@
     "analyze": "node src/cli.js",
     "test": "node --test",
     "benchmark": "node scripts/benchmark.js",
+    "strength": "node scripts/strength.js",
     "selfplay": "node scripts/selfplay.js"
   },
   "dependencies": { "5d-chess-js": "1.2.1" }

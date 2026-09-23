@@ -47,6 +47,8 @@ test('analysis runs separately, produces a legal action, and can be played', asy
   } while (job.status === 'running' && Date.now() < deadline);
   assert.equal(job.status, 'done', job.error);
   assert.ok(Array.isArray(job.result.bestAction));
+  assert.equal(job.result.limits.cacheMemoryMb, 128);
+  assert.equal(job.result.limits.maxNodes, 2000000);
   const played = await request('/api/play', { jobId: created.data.jobId, revision: initial.revision });
   assert.equal(played.status, 200, played.data.error);
   assert.equal(played.data.position.action, 1);
@@ -60,6 +62,46 @@ test('local server rejects foreign origins and invalid analysis budgets', async 
   assert.equal(denied.status, 403);
   assert.equal((await request('/api/analyze', { timeMs: -1 })).status, 400);
   assert.equal((await request('/api/new', { variant: 'does-not-exist' })).status, 400);
+});
+
+test('analysis forwards node and cache memory budgets to the worker, including disabling the cache', async t => {
+  const { request } = await fixture(t);
+  for (const cacheMemoryMb of [4096, 0]) {
+    const created = await request('/api/analyze', { timeMs: 1000, maxDepth: 1, quiescenceDepth: 0, maxNodes: 1000000000, cacheMemoryMb });
+    assert.equal(created.status, 202, created.data.error);
+    let job;
+    const deadline = Date.now() + 8000;
+    do {
+      await delay(20);
+      job = (await request(`/api/analysis/${created.data.jobId}`)).data;
+    } while (job.status === 'running' && Date.now() < deadline);
+    assert.equal(job.status, 'done', job.error);
+    assert.equal(job.result.limits.maxNodes, 1000000000);
+    assert.equal(job.result.limits.cacheMemoryMb, cacheMemoryMb);
+    assert.ok(Array.isArray(job.result.bestAction));
+    if (cacheMemoryMb === 0) {
+      assert.equal(job.result.tableEntries, 0);
+      assert.equal(job.result.cacheMemoryBytes, 0);
+    } else {
+      assert.ok(job.result.tableEntries > 0);
+      assert.ok(job.result.cacheMemoryBytes > 0);
+      assert.ok(job.result.cacheMemoryBytes <= cacheMemoryMb * 1024 * 1024);
+    }
+  }
+});
+
+test('analysis rejects out-of-range and malformed resource budgets', async t => {
+  const { request } = await fixture(t);
+  for (const maxNodes of [0, -1, 1.5, 1000000001, null, true, '', []]) {
+    const response = await request('/api/analyze', { maxNodes });
+    assert.equal(response.status, 400, `Accepted maxNodes ${JSON.stringify(maxNodes)}`);
+    assert.match(response.data.error, /Node budget must be an integer/);
+  }
+  for (const cacheMemoryMb of [-1, 0.5, 4097, null, true, '', []]) {
+    const response = await request('/api/analyze', { cacheMemoryMb });
+    assert.equal(response.status, 400, `Accepted cacheMemoryMb ${JSON.stringify(cacheMemoryMb)}`);
+    assert.match(response.data.error, /Cache memory must be an integer/);
+  }
 });
 
 test('stopping a long search returns an interrupted result and preserves the position', async t => {
