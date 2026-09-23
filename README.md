@@ -66,12 +66,19 @@ if (result.bestAction !== null) {
 npm test
 npm run benchmark
 npm run strength -- --nodes 50000 --repeat 2 --strict
+npm run match -- --engine-a src/search.js --engine-b path/to/baseline/search.js --nodes 10000 --plies 40 --output artifacts/match.json
 npm run selfplay
 ```
 
 Tests cover temporal geometry, history immutability, present shifting, complete-turn legality, optional inactive boards, tactical search, interruption, game export/import, and HTTP integration. The benchmark reports local throughput and verifies returned actions. Self-play is a diagnostic and stops at a turn limit; it does not assign an Elo or count an unfinished game as a draw.
 
 The tactical suite in `examples/tactics/` measures captures for both colors, coordinated multi-board captures and evasions, temporal mates, knight underpromotion, defended captures, and terminal positions. `npm run strength -- --nodes 1000,5000,20000,50000 --repeat 2 --json` reports results at fixed work budgets. Each run validates the full principal variation and checks that the input history is unchanged; repeats check deterministic search results. `--strict` exits with failure if a selected case is unsolved or invalid. Use `--case ID` to inspect one case and `--engine PATH` to compare an earlier compatible search module. These are curated regressions, not an independent rating.
+
+Paired matches use the independent miniature and opening positions in `examples/matches/suite.json`, giving each engine both colors under equal search/generation work limits. `--suite FILE`, `--case ID,ID`, `--depth N`, and `--qdepth N` control the comparison; alternate modules must export `analyze`. `--seed 1,2 --opening-plies 2` adds reproducible legal opening variations. Seeds without opening plies repeat the same starts and do not add independent evidence. Reports preserve full move traces, validate actions and principal variations, check input immutability, and expose deterministic self-match discrepancies when both engine paths are identical.
+
+Only exhaustive full-rule verification awards a checkmate win or stalemate draw. Verification can become expensive on large multiverses; `--terminal-work N` and `--time-ms N` bound it, and reaching either cap leaves the game `UNFINISHED`. Turn caps, missing moves, time stops and search-policy boundaries also stay unfinished; a legal fallback from an incomplete node-limited search can continue. There is no repetition or evaluation-based draw adjudication. Reports include scores among finished games and separately among complete color-swapped pairs: prefer the paired figure, because differing unfinished rates can bias the former. The suite is a development diagnostic, not an Elo rating or broad strength guarantee.
+
+[The heuristic experiment report](docs/heuristic-tuning.md) records 54 alternatives, paired matches, rejected changes, and reproduction commands. `scripts/snapshot-engine.js` freezes a Git revision for comparison, and `scripts/tune-weights.js` screens isolated evaluation profiles before matches. No candidate established a reliable improvement in this experiment, so the production heuristics were retained.
 
 Search retains the exact order of a preferred full turn, including optional moves after a legal submission. Quiet-move history transfers across half-turns, so useful ordering survives as the search deepens. Tactical cache entries are isolated by horizon and share the configured table-size limit; `qTtHits` reports their reuse. The checked-horizon boundary also verifies whether an evasion itself ends the game before assigning a static score. Immutable board encodings are reused within each search while keeping exact, complete-history position keys. Temporal evaluation uses allocation-free integer geometry and includes pawn and brawn royal threats.
 

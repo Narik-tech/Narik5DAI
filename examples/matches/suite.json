@@ -1,0 +1,16 @@
+{
+  "version": 1,
+  "description": "Fixed paired-match development suite. Miniature positions and ordinary openings are independent of the tactical regression fixtures; limited results are not a general playing-strength rating.",
+  "cases": [
+    { "id": "mini-rooks", "category": "miniature", "pgn": "[Board \"Custom\"]\n[Size \"4x4\"]\n[2rk/4/4/KR2:0:1:w]" },
+    { "id": "mini-knights", "category": "miniature", "pgn": "[Board \"Custom\"]\n[Size \"4x4\"]\n[2nk/2p1/1P2/KN2:0:1:w]" },
+    { "id": "mini-bishops", "category": "miniature", "pgn": "[Board \"Custom\"]\n[Size \"4x4\"]\n[2bk/1p2/2P1/KB2:0:1:w]" },
+    { "id": "mini-mixed", "category": "miniature", "pgn": "[Board \"Custom\"]\n[Size \"5x5\"]\n[2r1k/3p1/5/1P3/K1N2:0:1:w]" },
+    { "id": "mini-queens", "category": "miniature", "pgn": "[Board \"Custom\"]\n[Size \"5x5\"]\n[3qk/2p2/5/2P2/KQ3:0:1:w]" },
+    { "id": "mini-pawns", "category": "miniature", "pgn": "[Board \"Custom\"]\n[Size \"5x5\"]\n[4k/1pp2/5/2PP1/K4:0:1:w]" },
+    { "id": "open-king", "category": "opening", "pgn": "1. e4 / e5 2. Bc4 / Nf6" },
+    { "id": "open-queen", "category": "opening", "pgn": "1. d4 / d5 2. Nf3 / Nf6" },
+    { "id": "open-flank", "category": "opening", "pgn": "1. c4 / e5 2. Nc3 / Nc6" },
+    { "id": "open-fianchetto", "category": "opening", "pgn": "1. g3 / d5 2. Bg2 / e5" }
+  ]
+}

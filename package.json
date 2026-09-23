@@ -12,6 +12,7 @@
     "test": "node --test",
     "benchmark": "node scripts/benchmark.js",
     "strength": "node scripts/strength.js",
+    "match": "node scripts/match.js",
     "selfplay": "node scripts/selfplay.js"
   },
   "dependencies": { "5d-chess-js": "1.2.1" }

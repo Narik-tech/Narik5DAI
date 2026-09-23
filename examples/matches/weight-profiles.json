@@ -1,0 +1,169 @@
+[
+  {
+    "id": "baseline",
+    "scales": {}
+  },
+  {
+    "id": "activity-0.5",
+    "scales": {
+      "activity": 0.5
+    }
+  },
+  {
+    "id": "activity-1.5",
+    "scales": {
+      "activity": 1.5
+    }
+  },
+  {
+    "id": "activity-2",
+    "scales": {
+      "activity": 2
+    }
+  },
+  {
+    "id": "kingSafety-0.5",
+    "scales": {
+      "kingSafety": 0.5
+    }
+  },
+  {
+    "id": "kingSafety-1.5",
+    "scales": {
+      "kingSafety": 1.5
+    }
+  },
+  {
+    "id": "kingSafety-2",
+    "scales": {
+      "kingSafety": 2
+    }
+  },
+  {
+    "id": "temporal-0",
+    "scales": {
+      "temporal": 0
+    }
+  },
+  {
+    "id": "temporal-2",
+    "scales": {
+      "temporal": 2
+    }
+  },
+  {
+    "id": "temporal-4",
+    "scales": {
+      "temporal": 4
+    }
+  },
+  {
+    "id": "timelines-0",
+    "scales": {
+      "timelines": 0
+    }
+  },
+  {
+    "id": "timelines-0.5",
+    "scales": {
+      "timelines": 0.5
+    }
+  },
+  {
+    "id": "timelines-1.5",
+    "scales": {
+      "timelines": 1.5
+    }
+  },
+  {
+    "id": "timelines-2",
+    "scales": {
+      "timelines": 2
+    }
+  },
+  {
+    "id": "travel-0",
+    "scales": {
+      "travel": 0
+    }
+  },
+  {
+    "id": "travel-0.5",
+    "scales": {
+      "travel": 0.5
+    }
+  },
+  {
+    "id": "travel-1.5",
+    "scales": {
+      "travel": 1.5
+    }
+  },
+  {
+    "id": "travel-2",
+    "scales": {
+      "travel": 2
+    }
+  },
+  {
+    "id": "pawn-restraint",
+    "replace": [
+      [
+        "rank * 7 + Math.max(0, rank - 3) ** 2 * 7",
+        "rank * 3 + Math.max(0, rank - 3) ** 2 * 4"
+      ]
+    ]
+  },
+  {
+    "id": "passed-pawns",
+    "replace": [
+      [
+        "8 + rank * rank * 2",
+        "12 + rank * rank * 4"
+      ]
+    ]
+  },
+  {
+    "id": "knights400",
+    "replace": [
+      [
+        "100, 355, 340, 550, 1150",
+        "100, 355, 400, 550, 1150"
+      ]
+    ]
+  },
+  {
+    "id": "queens950",
+    "replace": [
+      [
+        "100, 355, 340, 550, 1150",
+        "100, 355, 340, 550, 950"
+      ]
+    ]
+  },
+  {
+    "id": "development36",
+    "replace": [
+      [
+        "activity -= sign * 12 * middleGame",
+        "activity -= sign * 36 * middleGame"
+      ]
+    ]
+  },
+  {
+    "id": "prophylaxis",
+    "scales": {
+      "kingSafety": 1.5,
+      "timelines": 1.5,
+      "travel": 0.5
+    }
+  },
+  {
+    "id": "active-play",
+    "scales": {
+      "activity": 1.5,
+      "timelines": 0.5,
+      "travel": 1.5
+    }
+  }
+]
