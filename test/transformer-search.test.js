@@ -1,10 +1,20 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { analyze, MATE_SCORE } from '../src/transformer-search.js';
-import { createPosition, formatAction, generateActions, inCheck, positionKey, validateAction } from '../src/rules.js';
+import { applyMove, createPosition, formatAction, generateActions, inCheck, positionKey, raw, validateAction } from '../src/rules.js';
 
 const limits = { timeMs: 10000, maxNodes: 100000, maxDepth: 1 };
 const zero = async positions => positions.map(() => 0);
+const smallBoard = () => [[12, 0, 0, 0], [0, 0, 0, 0], [0, 0, 0, 0], [0, 0, 0, 11]];
+const smallPosition = (board, action = 0) => ({ board, action, promotions: [10, 9, 8, 7, 6, 5, 4, 3] });
+function usesOptionalBoard(position, moves) {
+  let current = position;
+  for (const move of moves) {
+    if (!raw.boardFuncs.present(current.board, current.action).includes(move[0][0])) return true;
+    current = applyMove(current, move);
+  }
+  return false;
+}
 function firstActions(position, count = 8) {
   const result = [];
   for (const candidate of generateActions(position)) {
@@ -26,10 +36,16 @@ function fractionalValue(position) {
 // Independent exhaustive minimax over the same bounded candidate universe.
 // Fractional values exercise alpha-beta bounds that must not assume integer scores.
 function minimax(position, remaining, candidateLimit, innerCandidateLimit = candidateLimit, ply = 0) {
-  const choices = firstActions(position, ply ? innerCandidateLimit : candidateLimit);
   const side = position.action % 2 ? -1 : 1;
+  if (!remaining && firstActions(position, 1).length) return { score: fractionalValue(position), actions: [] };
+  // Materialize and partition the full legal set independently of the search's
+  // lazy two-pass traversal before applying the same candidate cap.
+  const all = [...generateActions(position)];
+  const choices = [
+    ...all.filter(candidate => !usesOptionalBoard(position, candidate.moves)),
+    ...all.filter(candidate => usesOptionalBoard(position, candidate.moves)),
+  ].slice(0, ply ? innerCandidateLimit : candidateLimit);
   if (!choices.length) return { score: inCheck(position) ? side * (-MATE_SCORE + ply) : 0, actions: [] };
-  if (!remaining) return { score: fractionalValue(position), actions: [] };
   let best = -Infinity, score, actions = [];
   for (const candidate of choices) {
     const value = minimax(candidate.position, remaining - 1, candidateLimit, innerCandidateLimit, ply + 1).score;
@@ -164,6 +180,79 @@ test('multiple active boards are evaluated and played as complete submissions', 
   assert.equal(result.depth, 1);
   assert(result.bestAction.length >= 2);
   assert.equal(validatePv(position, result).action, 1);
+});
+
+test('required-board alternatives fill the root cap before future or inactive boards', async () => {
+  const starts = [
+    smallPosition([[smallBoard()], null, [smallBoard(), smallBoard(), smallBoard()]]),
+    smallPosition([[smallBoard(), smallBoard(), smallBoard()], null, [smallBoard()]]),
+    smallPosition([[smallBoard()], null, [smallBoard()], null, [smallBoard()]]),
+    smallPosition([[smallBoard(), smallBoard()], null, [smallBoard(), smallBoard(), smallBoard(), smallBoard()]], 1),
+  ];
+  for (const position of starts) {
+    const before = positionKey(position);
+    const required = [...generateActions(position)].filter(candidate => !usesOptionalBoard(position, candidate.moves));
+    const expected = required.slice(0, 3), seen = [];
+    const favorite = positionKey(expected[2].position);
+    const result = await analyze(position, { ...limits, candidateLimit: 3,
+      evaluateBatch: async positions => {
+        seen.push(...positions.map(positionKey));
+        return positions.map(pos => positionKey(pos) === favorite ? (position.action % 2 ? -321 : 321) : 0);
+      },
+    });
+    assert.equal(result.depth, 1);
+    assert.deepEqual(seen, expected.map(candidate => positionKey(candidate.position)));
+    assert.equal(positionKey(validatePv(position, result)), favorite);
+    assert.equal(positionKey(position), before);
+  }
+});
+
+test('required-board alternatives also take priority under a separate reply cap', async () => {
+  const position = smallPosition([[smallBoard()], null, [smallBoard(), smallBoard(), smallBoard(), smallBoard()]]);
+  const root = firstActions(position, 1)[0];
+  const replies = [...generateActions(root.position)].filter(candidate => !usesOptionalBoard(root.position, candidate.moves)).slice(0, 3);
+  const favorite = positionKey(replies[2].position), batches = [];
+  const result = await analyze(position, { ...limits, maxDepth: 2, candidateLimit: 1, innerCandidateLimit: 3,
+    evaluateBatch: async positions => {
+      batches.push(positions.map(positionKey));
+      return positions.map(pos => positionKey(pos) === favorite ? -475 : 0);
+    },
+  });
+  assert.equal(result.depth, 2);
+  assert.deepEqual(batches, [[positionKey(root.position)], replies.map(candidate => positionKey(candidate.position))]);
+  assert.equal(result.score, -475);
+  assert.equal(positionKey(validatePv(position, result)), favorite);
+});
+
+test('optional turns remain searchable after every required-only turn without duplicates', async () => {
+  const position = smallPosition([[smallBoard()], null, [smallBoard(), smallBoard(), smallBoard()]]);
+  const all = [...generateActions(position)];
+  const required = all.filter(candidate => !usesOptionalBoard(position, candidate.moves));
+  const favorite = all.find(candidate => candidate.moves[0][0][0] === 2);
+  const wanted = positionKey(favorite.position), seen = [];
+  const result = await analyze(position, { ...limits, candidateLimit: 256,
+    evaluateBatch: async positions => {
+      seen.push(...positions.map(positionKey));
+      return positions.map(pos => positionKey(pos) === wanted ? 500 : 0);
+    },
+  });
+  assert.equal(result.depth, 1);
+  assert.equal(result.candidateCaps, 0);
+  assert.deepEqual(seen.slice(0, required.length), required.map(candidate => positionKey(candidate.position)));
+  assert.deepEqual(seen.toSorted(), all.map(candidate => positionKey(candidate.position)).sort());
+  assert.equal(new Set(seen).size, seen.length);
+  assert.equal(positionKey(validatePv(position, result)), wanted);
+});
+
+test('an optional-board move can still be the only way to avoid a terminal position', async () => {
+  const required = [[0, 11, 12], [7, 0, 0], [3, 0, 0]];
+  const future = [[0, 8, 0], [11, 0, 0], [4, 0, 12]];
+  const position = smallPosition([[required], null, [structuredClone(future), structuredClone(future), future]]);
+  const result = await analyze(position, { ...limits, candidateLimit: 1, evaluateBatch: zero });
+  assert.equal(result.depth, 1);
+  assert.equal(result.status, 'ok');
+  assert.equal(result.bestAction[0][0][0], 2);
+  validatePv(position, result);
 });
 
 test('larger candidate caps split inference requests at the service batch limit', async () => {

@@ -17,7 +17,8 @@ transformer Python environment are required to start training; saved games can
 be reviewed without starting a model.
 
 Adjust the parameters before starting a run. Settings cover cycle count
-(`0` means continuous), self-play games, concurrent games and turn limits, search budgets,
+(`0` means continuous), self-play games, independent self-play and arena concurrency,
+turn limits, search budgets,
 training updates, batch size, learning rate, replay capacity, exploration,
 device, and the paired promotion gate. Changes apply to the next run.
 Browser preferences are saved locally; each cycle also records its exact
@@ -67,12 +68,31 @@ The Training page exposes the same **Concurrent games** setting. It accepts
 game searches in its own CPU worker, sharing one loaded inference model. The
 inference queue drops cancelled work before sending it to Python and keeps at
 most one request in flight. This avoids multiplying GPU model memory. Training
-updates and the paired promotion arena still run after generation, sequentially.
+updates and the paired promotion arena still run after generation as separate phases.
+
+To also play up to four arena games concurrently:
+
+```powershell
+node scripts/transformer-selfplay.js --iterations 0 --device cuda --game-concurrency 4 --arena-concurrency 4
+```
+
+The Training page exposes **Concurrent arena games** under **Arena & promotion**.
+`--arena-concurrency` accepts 1–8 and defaults to 1, independently of self-play
+concurrency. It limits active games, rather than pairs, and is capped by the
+number of scheduled arena games. Each active search uses a CPU worker. All
+arena games share one candidate inference runtime and one separate incumbent
+runtime, each with its own queue; increasing arena concurrency does not load
+another model copy for every game. Starts and color-swapped pairs are scheduled
+in the same order at every concurrency setting. Saved game numbers and arena
+report order remain stable even if games finish out of order; live events also
+report `completedGames`.
 
 Start with 2 or 4 when CPU capacity permits. More workers use more CPU and
-memory; speedup depends on the positions and inference load. Rules validation,
+memory; speedup depends on the positions and inference load. In both phases, rules validation,
 exploration and terminal certification share the coordinator, and search time
-limits still use wall time, so contention can reduce completed search depth.
+limits still use wall time, so contention can change cutoff timing and reduce
+completed search depth. Arena pairing and equal per-move budgets are preserved,
+but results can vary when concurrent games compete for resources.
 Lower concurrency if timeouts increase.
 
 For continuous operation with automatic device selection (CUDA when available),
@@ -130,6 +150,7 @@ if you want to preserve an earlier check's copied checkpoint.
 | Replay | At most 8,192 unique full-history positions |
 | Training weights | Equal total weight per self-play game represented in replay |
 | Arena | 8 distinct starts, 2 games/start with colors swapped, 80 turns/game |
+| Concurrent arena games | 1; `--arena-concurrency` accepts 1–8 independently of self-play |
 | Promotion | At least 4 completed distinct pairs; candidate score at least 55% |
 | Retention | Latest 5 iteration folders, replay, latest report and previous model |
 
@@ -295,8 +316,9 @@ records are saved as they finish, including during a cooperative stop.
 `node --test` covers game legality, outcomes for both colors, target blending,
 unfinished games, exploration, invalid-result rejection, cancellation, replay
 deduplication/mixing, atomic checkpoint replacement, locks, and the paired gate.
-Concurrency tests cover bounded overlap, completion order, per-game random
-streams, cancellation, failed record writes and the shared inference queue.
+Concurrency tests cover bounded overlap, stable game and arena pair order,
+per-game random streams, cancellation, failed record writes and shared inference
+queues with separate candidate and incumbent runtimes.
 Training UI tests also cover parameter validation, concurrent starts, cooperative
 stop and shutdown, external runner locks, history browsing, and read-only legal
 replay. These tests use temporary artifacts and fake workers. The optional

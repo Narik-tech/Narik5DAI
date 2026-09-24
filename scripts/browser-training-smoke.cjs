@@ -33,7 +33,7 @@ async function createHistory(root) {
   await fs.mkdir(folder, { recursive: true });
   const report = { runId: 'browser-smoke', iteration: 1, status: 'complete', promoted: false,
     startedAt: '2026-09-23T12:00:00.000Z', finishedAt: '2026-09-23T12:01:00.000Z',
-    options: { games: 2, steps: 16, batchSize: 8, arenaPairs: 2, minPairs: 1 },
+    options: { games: 2, steps: 16, batchSize: 8, arenaPairs: 2, arenaConcurrency: 2, minPairs: 1 },
     selfplay: { games: 1, finished: 0, unfinished: 1, samples: 2 }, replay: { samples: 2 },
     arena: { decision: { promote: false, reason: 'insufficient-complete-distinct-pairs',
       candidateScore: null, eligiblePairs: 0, minPairs: 1 } } };
@@ -146,17 +146,24 @@ async function createHistory(root) {
     await page.locator('#start-training').click();
     assert.equal(started.length, 0, 'Invalid configuration cannot start training.');
     await fillParameter('games', '3');
+    assert.equal(await page.locator('#param-arenaConcurrency').inputValue(), '1');
+    await fillParameter('arenaConcurrency', '9');
+    await page.locator('#start-training').click();
+    assert.equal(started.length, 0, 'Invalid arena concurrency cannot start training.');
+    await fillParameter('arenaConcurrency', '4');
     await fillParameter('steps', '17');
     await fillParameter('learningRate', '0.0005');
     await page.reload();
     await page.waitForFunction(() => !document.getElementById('start-training').disabled);
     assert.equal(await page.locator('#param-games').inputValue(), '3');
+    assert.equal(await page.locator('#param-arenaConcurrency').inputValue(), '4');
     assert.equal(await page.locator('#param-steps').inputValue(), '17');
     assert.equal(Number(await page.locator('#param-learningRate').inputValue()), 0.0005);
     await page.locator('#start-training').click();
     await page.waitForFunction(() => !document.getElementById('stop-training').disabled);
     assert.equal(started.length, 1);
     assert.equal(started[0].games, 3);
+    assert.equal(started[0].arenaConcurrency, 4);
     assert.equal(started[0].steps, 17);
     assert.equal(started[0].learningRate, 0.0005);
     assert.equal(await page.locator('#start-training').isDisabled(), true);
@@ -165,6 +172,7 @@ async function createHistory(root) {
     await page.waitForFunction(() => !document.getElementById('start-training').disabled);
     await page.locator('#reuse-parameters').click();
     assert.equal(await page.locator('#param-steps').inputValue(), '16');
+    assert.equal(await page.locator('#param-arenaConcurrency').inputValue(), '2');
     assert.equal(started.length, 1, 'Reusing parameters must not start a run.');
     await page.locator('.game-item[data-game-id="selfplay-001"]').click();
     await page.locator('#review-content').waitFor({ state: 'visible' });

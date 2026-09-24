@@ -19,6 +19,14 @@ function firstLegal(position) {
     nodes: 2, searchNodes: 1, generationNodes: 1, stoppedReason: 'depth', score: 99999 };
 }
 
+const nextTurn = () => new Promise(resolve => setImmediate(resolve));
+function deferred() {
+  let resolve;
+  const promise = new Promise(done => { resolve = done; });
+  return { promise, resolve };
+}
+const parallelSuite = () => ({ cases: [{ id: 'tiny', position: tiny() }, { id: 'mating', position: mating() }] });
+
 function syntheticPairs(outcomes, { duplicate = false, unplayed = false } = {}) {
   const games = [], pairs = [];
   for (const [index, results] of outcomes.entries()) {
@@ -122,6 +130,93 @@ test('arena rotates deterministically, deduplicates complete positions, swaps co
   assert.deepEqual(report.summary.completion, report.decision.completion);
   assert.equal(report.summary.completion.totalPairs, 2);
   assert.equal(report.summary.completion.totalGames, 4);
+});
+
+test('parallel arena bounds overlapping games, serializes completion callbacks and preserves pair indices', { timeout: 5000 }, async () => {
+  const firstGame = deferred(), observed = [];
+  let launched = 0, active = 0, peak = 0, writing = 0, peakWriting = 0;
+  const engine = async position => {
+    const index = launched++;
+    peak = Math.max(peak, ++active);
+    try {
+      if (index === 0) await firstGame.promise;
+      return firstLegal(position);
+    } finally { active--; }
+  };
+  const report = await evaluateCandidate({ candidate: engine, incumbent: engine, suite: parallelSuite(),
+    pairs: 2, minPairs: 1, seed: 0, gameConcurrency: 2, ...limits,
+    onGame: async (game, progress) => {
+      assert.equal(game.index, progress.index);
+      peakWriting = Math.max(peakWriting, ++writing);
+      await nextTurn();
+      observed.push({ index: game.index, ...progress });
+      if (progress.index === 2) firstGame.resolve();
+      game.valid = false;
+      writing--;
+    },
+  });
+  assert.equal(peak, 2);
+  assert.equal(active, 0);
+  assert.equal(peakWriting, 1, 'Completion callbacks must not overlap.');
+  assert.deepEqual(observed.slice(0, 2).map(item => item.index), [1, 2]);
+  assert.deepEqual(observed.map(item => item.completed), [1, 2, 3, 4]);
+  assert(observed.every(item => item.total === 4));
+  assert.deepEqual(observed.map(item => item.index).toSorted(), [0, 1, 2, 3]);
+  assert.deepEqual(report.games.map(game => game.index), [0, 1, 2, 3]);
+  assert.deepEqual(report.games.map(game => [game.caseId, game.aColor]),
+    [['tiny', 0], ['tiny', 1], ['mating', 0], ['mating', 1]]);
+  assert.deepEqual(report.pairs.map(pair => pair.gameIndices), [[0, 1], [2, 3]]);
+  assert(report.games.every(game => game.valid));
+  for (const pair of report.pairs) {
+    assert(pair.gameIndices.every(index => report.games[index].initialKey === pair.initialKey));
+  }
+});
+
+test('parallel and default serial arenas preserve deterministic selection, games and promotion decisions', async () => {
+  const suite = { cases: [{ id: 'tiny', position: tiny() }, { id: 'duplicate', position: tiny() },
+    { id: 'terminal', position: terminal() }, { id: 'mating', position: mating() }] };
+  const original = structuredClone(suite);
+  const engine = async (position, options) => {
+    await nextTurn();
+    const { elapsedMs, ...result } = analyze(position, options);
+    return result;
+  };
+  const options = { candidate: engine, incumbent: engine, suite, pairs: 4, minPairs: 1, seed: 1, ...limits };
+  const serial = await evaluateCandidate(options);
+  assert.equal(serial.gameConcurrency, 1);
+  assert.deepEqual(serial.scheduledCases, ['duplicate', 'mating']);
+  assert.deepEqual(serial.skippedCases.map(item => item.reason), ['terminal-start', 'duplicate-position']);
+  assert.equal(serial.decision.eligiblePairs, 1);
+  assert.equal(serial.decision.candidateScore, 0.5);
+  assert.equal(serial.decision.reason, 'no-winning-margin');
+  for (const gameConcurrency of [1, 3, 8]) {
+    const parallel = await evaluateCandidate({ ...options, gameConcurrency });
+    assert.equal(parallel.gameConcurrency, gameConcurrency);
+    assert.deepEqual({ ...parallel, gameConcurrency: 1 }, serial);
+  }
+  assert.deepEqual(suite, original);
+});
+
+test('arena plans and validates all scheduled cases before starting parallel engines', async () => {
+  let calls = 0;
+  const engine = position => { calls++; return firstLegal(position); };
+  await assert.rejects(evaluateCandidate({ candidate: engine, incumbent: engine,
+    suite: { cases: [{ id: 'tiny', position: tiny() }, { position: mating() }] },
+    pairs: 2, seed: 0, gameConcurrency: 2, ...limits }), /string id/);
+  assert.equal(calls, 0);
+});
+
+test('arena yields during planning so queued cancellation prevents game dispatch', async () => {
+  let stop = false, calls = 0;
+  const timer = setImmediate(() => { stop = true; });
+  const engine = position => { calls++; return firstLegal(position); };
+  try {
+    await assert.rejects(evaluateCandidate({ candidate: engine, incumbent: engine,
+      suite: parallelSuite(), pairs: 2, seed: 0, gameConcurrency: 2, ...limits,
+      shouldStop: () => stop,
+    }), { name: 'AbortError' });
+    assert.equal(calls, 0);
+  } finally { clearImmediate(timer); }
 });
 
 test('terminal starts never run engines or count towards a minimum', async () => {
@@ -242,19 +337,119 @@ test('cancellation rejects before games and while awaiting an unresponsive engin
   } finally { clearTimeout(timer); }
 });
 
+test('parallel cancellation stops dispatch and drains started cooperative engines', { timeout: 5000 }, async () => {
+  const allStarted = deferred();
+  let started = 0, active = 0, stopped = 0, writes = 0, stop = false;
+  const engine = async (position, { shouldStop }) => {
+    active++;
+    if (++started === 3) allStarted.resolve();
+    try {
+      await allStarted.promise;
+      while (!shouldStop()) await nextTurn();
+      stopped++;
+      const error = new Error('Stopped'); error.name = 'AbortError'; throw error;
+    } finally { active--; }
+  };
+  const evaluation = evaluateCandidate({ candidate: engine, incumbent: engine, suite: parallelSuite(),
+    pairs: 2, gameConcurrency: 3, shouldStop: () => stop, ...limits,
+    onGame: () => { writes++; },
+  });
+  const rejected = assert.rejects(evaluation, { name: 'AbortError' });
+  await allStarted.promise;
+  stop = true;
+  await rejected;
+  assert.equal(started, 3);
+  assert.equal(stopped, 3);
+  assert.equal(active, 0);
+  assert.equal(writes, 0);
+  await nextTurn();
+  assert.equal(started, 3);
+  assert.equal(writes, 0);
+});
+
+test('parallel cancellation waits for an in-flight completion callback before rejecting', { timeout: 5000 }, async () => {
+  const allStarted = deferred(), writing = deferred(), finishWrite = deferred();
+  let started = 0, active = 0, writes = 0, stop = false, settled = false;
+  const engine = async (position, { shouldStop }) => {
+    const index = started++;
+    active++;
+    if (started === 3) allStarted.resolve();
+    try {
+      await allStarted.promise;
+      if (index === 0) return firstLegal(position);
+      while (!shouldStop()) await nextTurn();
+      const error = new Error('Stopped'); error.name = 'AbortError'; throw error;
+    } finally { active--; }
+  };
+  const evaluation = evaluateCandidate({ candidate: engine, incumbent: engine, suite: parallelSuite(),
+    pairs: 2, gameConcurrency: 3, shouldStop: () => stop, ...limits,
+    onGame: async () => {
+      writing.resolve();
+      await finishWrite.promise;
+      writes++;
+    },
+  });
+  evaluation.then(() => { settled = true; }, () => { settled = true; });
+  const rejected = assert.rejects(evaluation, { name: 'AbortError' });
+  await writing.promise;
+  stop = true;
+  await nextTurn();
+  assert.equal(settled, false, 'The arena must drain the callback before settling.');
+  finishWrite.resolve();
+  await rejected;
+  assert.equal(started, 3);
+  assert.equal(active, 0);
+  assert.equal(writes, 1);
+  await nextTurn();
+  assert.equal(started, 3);
+  assert.equal(writes, 1);
+});
+
+test('a parallel completion callback failure cancels sibling engines and preserves the failure', { timeout: 5000 }, async () => {
+  const allStarted = deferred(), failure = new Error('Arena report unavailable');
+  let started = 0, active = 0, stopped = 0, writes = 0;
+  const engine = async (position, { shouldStop }) => {
+    const index = started++;
+    active++;
+    if (started === 3) allStarted.resolve();
+    try {
+      await allStarted.promise;
+      if (index === 0) return firstLegal(position);
+      while (!shouldStop()) await nextTurn();
+      stopped++;
+      const error = new Error('Stopped'); error.name = 'AbortError'; throw error;
+    } finally { active--; }
+  };
+  const evaluation = evaluateCandidate({ candidate: engine, incumbent: engine, suite: parallelSuite(),
+    pairs: 2, gameConcurrency: 3, ...limits,
+    onGame: async () => { writes++; await nextTurn(); throw failure; },
+  });
+  await assert.rejects(evaluation, error => error === failure);
+  assert.equal(started, 3);
+  assert.equal(stopped, 2);
+  assert.equal(active, 0);
+  assert.equal(writes, 1);
+  await nextTurn();
+  assert.equal(started, 3);
+  assert.equal(writes, 1);
+});
+
 test('engine cancellation and mutation are handled without forgiving invalid games', async () => {
   const suite = { cases: [{ id: 'tiny', position: tiny() }] };
   await assert.rejects(evaluateCandidate({ candidate: position => ({ ...firstLegal(position), stoppedReason: 'cancelled' }),
     incumbent: firstLegal, suite, ...limits }), { name: 'AbortError' });
-  const report = await evaluateCandidate({ candidate: position => { position.action += 2; return firstLegal(position); },
-    incumbent: firstLegal, suite, pairs: 1, minPairs: 1, ...limits });
-  assert.equal(report.decision.reason, 'invalid-games');
-  assert.equal(report.games[0].reason, 'input-mutation');
+  for (const gameConcurrency of [1, 2]) {
+    const report = await evaluateCandidate({ candidate: position => { position.action += 2; return firstLegal(position); },
+      incumbent: firstLegal, suite, pairs: 1, minPairs: 1, gameConcurrency, ...limits });
+    assert.equal(report.decision.reason, 'invalid-games');
+    assert.equal(report.games[0].reason, 'input-mutation');
+  }
 });
 
 test('invalid arena configuration is rejected before play', async () => {
   const base = { candidate: firstLegal, incumbent: firstLegal, suite: { cases: [{ id: 'tiny', position: tiny() }] } };
-  for (const patch of [{ pairs: 0 }, { minPairs: 0 }, { seed: -1 }, { promotionScore: 0.49 }, { timeMs: 0 }]) {
+  for (const patch of [{ pairs: 0 }, { minPairs: 0 }, { seed: -1 }, { promotionScore: 0.49 }, { timeMs: 0 },
+    ...[0, 9, 1.5, NaN, '2'].map(gameConcurrency => ({ gameConcurrency }))]) {
     await assert.rejects(evaluateCandidate({ ...base, ...patch }));
   }
 });

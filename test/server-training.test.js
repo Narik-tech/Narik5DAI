@@ -104,14 +104,16 @@ test('training HTTP flow applies editable parameters, reports progress and accep
   assert.equal(initial.data.availability.available, true);
   assert.equal(initial.data.defaults.iterations, 1);
   assert.equal(initial.data.defaults.gameConcurrency, 1);
+  assert.equal(initial.data.defaults.arenaConcurrency, 1);
   assert.deepEqual(initial.data.iterations, []);
   const started = await request('/api/training/start', { options: {
-    iterations: 2, games: 3, gameConcurrency: 2, steps: 17, batchSize: 4, learningRate: 0.002, device: 'cpu',
+    iterations: 2, games: 3, gameConcurrency: 2, arenaConcurrency: 4, steps: 17, batchSize: 4, learningRate: 0.002, device: 'cpu',
   } });
   assert.equal(started.status, 202, started.data.error);
   assert.equal(invocations.length, 1);
   assert.equal(invocations[0].options.steps, 17);
   assert.equal(invocations[0].options.gameConcurrency, 2);
+  assert.equal(invocations[0].options.arenaConcurrency, 4);
   assert.equal(invocations[0].options.learningRate, 0.002);
   assert.equal((await request('/api/training/start', { options: {} })).status, 409);
   workers[0].emit('message', { type: 'event', event: { event: 'training-start', iteration: 2, steps: 17 } });
@@ -130,6 +132,7 @@ test('training HTTP validation rejects untrusted options and foreign origins bef
     { python: 'cmd.exe' }, { checkpoint: '../outside.pt' }, { runDir: '../outside' },
     { games: true }, { games: '2' }, { games: 0 }, { learningRate: 0 },
     { gameConcurrency: '2' }, { gameConcurrency: 0 }, { gameConcurrency: 9 }, { gameConcurrency: 1.5 },
+    { arenaConcurrency: '2' }, { arenaConcurrency: 0 }, { arenaConcurrency: 9 }, { arenaConcurrency: 1.5 },
     { arenaPairs: 1, minPairs: 2 }, { unknown: 3 },
   ]) {
     const response = await request('/api/training/start', { options });

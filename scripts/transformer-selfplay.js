@@ -18,7 +18,7 @@ const defaults = {
   iterations: 1, games: 8, gameConcurrency: 1, maxPlies: 40, maxNodes: 20000, maxDepth: 2, timeMs: 3000,
   terminalWork: 20000, exploration: .2, explorationPlies: 12, outcomeWeight: .5,
   steps: 500, batchSize: 16, learningRate: .0001, replaySize: 8192, seed: 42,
-  arenaPairs: 8, minPairs: 4, arenaPlies: 80, promotionScore: .55, keepIterations: 5,
+  arenaPairs: 8, arenaConcurrency: 1, minPairs: 4, arenaPlies: 80, promotionScore: .55, keepIterations: 5,
   device: process.env.TRANSFORMER_DEVICE || 'auto',
   checkpoint: process.env.TRANSFORMER_CHECKPOINT || DEFAULT_CHECKPOINT,
   python: process.env.TRANSFORMER_PYTHON || DEFAULT_PYTHON,
@@ -49,6 +49,7 @@ Continuous shortcut: npm run transformer:selfplay:continuous
   --replay-size N      Maximum unique replay positions (8192)
   --seed-data FILE     Initial replay JSONL; "none" starts from self-play only
   --arena-pairs N      Distinct starts, each played with colors swapped (8)
+  --arena-concurrency N Concurrent arena games, 1..8; shared models (1)
   --min-pairs N        Minimum completed distinct pairs for promotion (4)
   --arena-plies N      Arena game turn cap (80)
   --promotion-score X  Required candidate score, strictly above 0.5 (0.55)
@@ -69,7 +70,7 @@ export function parseArguments(args, initialOptions = defaults) {
   const names = { iterations: 'iterations', games: 'games', 'game-concurrency': 'gameConcurrency', plies: 'maxPlies', nodes: 'maxNodes', depth: 'maxDepth',
     'time-ms': 'timeMs', 'terminal-work': 'terminalWork', exploration: 'exploration', 'exploration-plies': 'explorationPlies',
     'outcome-weight': 'outcomeWeight', steps: 'steps', 'batch-size': 'batchSize', 'learning-rate': 'learningRate',
-    'replay-size': 'replaySize', seed: 'seed', 'arena-pairs': 'arenaPairs', 'min-pairs': 'minPairs',
+    'replay-size': 'replaySize', seed: 'seed', 'arena-pairs': 'arenaPairs', 'arena-concurrency': 'arenaConcurrency', 'min-pairs': 'minPairs',
     'arena-plies': 'arenaPlies', 'promotion-score': 'promotionScore', 'keep-iterations': 'keepIterations' };
   const paths = { checkpoint: 'checkpoint', python: 'python', 'run-dir': 'runDir', 'seed-data': 'seedData', suite: 'suite', 'arena-suite': 'arenaSuite' };
   for (let i = 0; i < args.length; i++) {
@@ -88,7 +89,7 @@ export function parseArguments(args, initialOptions = defaults) {
     ['iterations', 0, 1000000], ['games', 1, 128], ['gameConcurrency', 1, 8], ['maxPlies', 1, 256], ['maxNodes', 1, 10000000],
     ['maxDepth', 1, 16], ['timeMs', 1, 60000], ['terminalWork', 1, 10000000], ['explorationPlies', 0, 256],
     ['steps', 1, 1000000], ['batchSize', 1, 128], ['replaySize', 1, 100000], ['seed', 0, 0xffffffff],
-    ['arenaPairs', 1, 128], ['minPairs', 1, 128], ['arenaPlies', 1, 256], ['keepIterations', 1, 100],
+    ['arenaPairs', 1, 128], ['arenaConcurrency', 1, 8], ['minPairs', 1, 128], ['arenaPlies', 1, 256], ['keepIterations', 1, 100],
   ]) if (!Number.isSafeInteger(options[name]) || options[name] < min || options[name] > max) throw new Error(`Invalid ${name}: expected integer ${min}..${max}.`);
   for (const name of ['exploration', 'outcomeWeight']) if (!Number.isFinite(options[name]) || options[name] < 0 || options[name] > 1) throw new Error(`Invalid ${name}.`);
   if (!(options.learningRate > 0 && options.learningRate <= .1)) throw new Error('Invalid learningRate.');
@@ -333,15 +334,18 @@ export async function runSelfPlay(options, { shouldStop = () => false, onRuntime
         const candidate = openRuntime(files.candidate), incumbent = openRuntime(files.incumbent);
         const candidateInfo = await candidate.start(); await incumbent.start();
         report.candidate = candidateInfo.model; report.candidateSha256 = await fileHash(files.candidate);
-        onEvent('arena-start', { iteration, pairs: options.arenaPairs, trainedSteps: candidateInfo.model.trainedSteps });
-        let arenaIndex = 0;
-        const arena = await evaluateCandidate({ candidate: openAnalyzer(candidate), incumbent: openAnalyzer(incumbent),
+        const arenaConcurrency = options.arenaConcurrency ?? 1;
+        onEvent('arena-start', { iteration, pairs: options.arenaPairs, trainedSteps: candidateInfo.model.trainedSteps,
+          gameConcurrency: Math.min(arenaConcurrency, options.arenaPairs * 2) });
+        const arena = await evaluateCandidate({ candidate: openAnalyzer(candidate, arenaConcurrency),
+          incumbent: openAnalyzer(incumbent, arenaConcurrency), gameConcurrency: arenaConcurrency,
           suite: arenaSuite, pairs: options.arenaPairs, seed, maxPlies: options.arenaPlies, maxNodes: options.maxNodes,
           maxDepth: options.maxDepth, timeMs: options.timeMs, terminalWork: options.terminalWork,
           minPairs: options.minPairs, promotionScore: options.promotionScore, shouldStop,
-          onGame: async game => {
-            await atomicWrite(path.join(folder, `arena-${String(++arenaIndex).padStart(3, '0')}.json`), json(game));
-            onEvent('arena-game', { iteration, game: arenaIndex, result: game.result, reason: game.reason });
+          onGame: async (game, { index, completed, total }) => {
+            await atomicWrite(path.join(folder, `arena-${String(index + 1).padStart(3, '0')}.json`), json(game));
+            onEvent('arena-game', { iteration, game: index + 1, completedGames: completed, totalGames: total,
+              result: game.result, reason: game.reason });
           } });
         await closeRuntimes(); checkStop(shouldStop);
         await atomicWrite(path.join(folder, 'arena.json'), json(arena));

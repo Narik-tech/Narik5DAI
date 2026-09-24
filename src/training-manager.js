@@ -8,7 +8,7 @@ import { raw, positionKey, validateAction } from './rules.js';
 const optionFlags = Object.freeze({ iterations: 'iterations', games: 'games', gameConcurrency: 'game-concurrency', maxPlies: 'plies', maxNodes: 'nodes',
   maxDepth: 'depth', timeMs: 'time-ms', terminalWork: 'terminal-work', exploration: 'exploration',
   explorationPlies: 'exploration-plies', outcomeWeight: 'outcome-weight', steps: 'steps', batchSize: 'batch-size',
-  learningRate: 'learning-rate', replaySize: 'replay-size', seed: 'seed', arenaPairs: 'arena-pairs',
+  learningRate: 'learning-rate', replaySize: 'replay-size', seed: 'seed', arenaPairs: 'arena-pairs', arenaConcurrency: 'arena-concurrency',
   minPairs: 'min-pairs', arenaPlies: 'arena-plies', promotionScore: 'promotion-score', keepIterations: 'keep-iterations', device: 'device' });
 // Environment mistakes disable training without preventing the classical
 // server or saved-game review from loading. Validate them per manager below.

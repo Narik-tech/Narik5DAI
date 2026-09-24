@@ -1,4 +1,4 @@
-import { createPositionKeyCache, generateActions, inCheck } from './rules.js';
+import { createPositionKeyCache, generateActions, inCheck, raw } from './rules.js';
 
 export const MATE_SCORE = 100_000;
 const MATE_THRESHOLD = MATE_SCORE - 1000;
@@ -56,8 +56,34 @@ export async function analyze(position, options = {}) {
       lastProgress = performance.now(); options.onProgress(snapshot());
     }
   }
-  function iterator(pos) {
-    return generateActions(pos, { tick, keyPosition, skipOptionalSpatial: false });
+  function* iterator(pos) {
+    const generated = new Set();
+    let hasOptionalMoves = false;
+    const generationOptions = { tick, keyPosition, skipOptionalSpatial: false };
+    function orderMoves(current, moves, requiredOnly = false) {
+      // Time travel can change the present during a complete turn. Both
+      // future active boards and inactive boards are optional source boards.
+      const present = new Set(raw.boardFuncs.present(current.board, current.action));
+      const required = [], optional = [];
+      for (const move of moves) (present.has(move[0][0]) ? required : optional).push(move);
+      hasOptionalMoves ||= optional.length > 0;
+      return requiredOnly ? required : required.concat(optional);
+    }
+    // Sorting component moves alone still lets depth-first optional extensions
+    // fill the candidate cap before the next required-board alternative.
+    // Generate every required-only submission before considering those turns.
+    for (const candidate of generateActions(pos, { ...generationOptions,
+      orderMoves: (current, moves) => orderMoves(current, moves, true),
+    })) {
+      generated.add(keyPosition(candidate.position));
+      yield candidate;
+    }
+    if (!hasOptionalMoves) return;
+    // Replay unrestricted generation to preserve optional-before-required
+    // sequences whose ordering changes a temporal arrival into a branch.
+    for (const candidate of generateActions(pos, { ...generationOptions, orderMoves })) {
+      if (!generated.has(keyPosition(candidate.position))) yield candidate;
+    }
   }
   function terminalValue(pos, ply) {
     return { score: inCheck(pos) ? -MATE_SCORE + ply : 0, pv: [], terminal: true, mateProven: true };
@@ -67,7 +93,7 @@ export async function analyze(position, options = {}) {
   function probeTerminal(pos, ply) {
     if (!terminalCache.has(pos)) {
       tick('search');
-      const legal = iterator(pos);
+      const legal = generateActions(pos, { tick, keyPosition, skipOptionalSpatial: false });
       try { terminalCache.set(pos, legal.next().done); }
       finally { legal.return?.(); }
     }

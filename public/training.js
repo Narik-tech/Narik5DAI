@@ -20,6 +20,7 @@ const fields = [
   { key:'timeMs', label:'Time / turn (ms)', min:1, max:60000, group:'Search budgets', advanced:true },
   { key:'terminalWork', label:'Terminal work', min:1, max:10000000, help:'Verify checkmate or stalemate', group:'Search budgets', advanced:true },
   { key:'arenaPairs', label:'Arena pairs', min:1, max:128, help:'Each start played both colors', group:'Arena & promotion', advanced:true },
+  { key:'arenaConcurrency', label:'Concurrent arena games', min:1, max:8, help:'Games share candidate and incumbent models; higher values use more CPU and memory', group:'Arena & promotion', advanced:true },
   { key:'minPairs', label:'Minimum pairs', min:1, max:128, help:'Complete pairs for promotion', group:'Arena & promotion', advanced:true },
   { key:'arenaPlies', label:'Arena turn cap', min:1, max:256, group:'Arena & promotion', advanced:true },
   { key:'promotionScore', label:'Promotion score', min:.5, exclusiveMin:true, max:1, step:'any', help:'Greater than 0.5; up to 1', group:'Arena & promotion', advanced:true },

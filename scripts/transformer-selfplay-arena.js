@@ -1,3 +1,4 @@
+import { setImmediate as yieldTurn } from 'node:timers/promises';
 import { createPosition, positionKey } from '../src/rules.js';
 import { certifyTerminal, runGame, summarizeGames, summarizePairs } from './match.js';
 
@@ -98,23 +99,36 @@ export function decidePromotion({ pairs = [], games = [], minPairs = 4, promotio
     limitation: 'This small deterministic paired arena is an operational acceptance gate, not independent statistical evidence of general strength or an Elo estimate.' };
 }
 
-/** Run candidate=A and incumbent=B on identical starts with colors swapped. */
+/**
+ * Run candidate=A and incumbent=B on identical starts with colors swapped.
+ * Both engines must support up to gameConcurrency concurrent search calls.
+ * Games and pairs retain their planned order; onGame(game, {index,completed,total})
+ * is awaited in completion order, with no overlapping callbacks.
+ */
 export async function evaluateCandidate({ candidate, incumbent, suite, pairs: requestedPairs = 4, seed = 1,
   maxPlies = 80, maxNodes = 20000, maxDepth = 2, timeMs = 3000, terminalWork = 20000,
-  minPairs = 4, promotionScore = 0.55, shouldStop, onGame } = {}) {
+  minPairs = 4, promotionScore = 0.55, gameConcurrency = 1, shouldStop, onGame } = {}) {
   if (typeof candidate !== 'function' || typeof incumbent !== 'function') throw new Error('candidate and incumbent must be analyze callbacks.');
   if (!suite || !Array.isArray(suite.cases) || !suite.cases.length) throw new Error('suite needs nonempty cases.');
   if (shouldStop !== undefined && typeof shouldStop !== 'function') throw new Error('shouldStop must be a function.');
   if (onGame !== undefined && typeof onGame !== 'function') throw new Error('onGame must be a function.');
   thresholds(minPairs, promotionScore);
   integer('pairs', requestedPairs, 1, 10000);
+  integer('gameConcurrency', gameConcurrency, 1, 8);
   integer('seed', seed, 0, 0xffffffff);
   for (const [name, value, minimum, maximum] of [
     ['maxPlies', maxPlies, 0, 10000], ['maxNodes', maxNodes, 0, 1e9], ['maxDepth', maxDepth, 1, 64],
     ['timeMs', timeMs, 1, 3600000], ['terminalWork', terminalWork, 0, 1e9],
   ]) integer(name, value, minimum, maximum);
   const limits = { maxPlies, maxNodes, maxDepth, timeMs, terminalWork, quiescenceDepth: 0, playOnTimeLimit: true };
-  let cancellation = null;
+  let cancellation = null, failed = false, failure;
+  function fail(error) {
+    if (!failed) { failed = true; failure = error; }
+    if (!cancellation) {
+      cancellation = new Error('Transformer self-play arena interrupted.');
+      cancellation.name = 'AbortError';
+    }
+  }
   function checkStopped() {
     if (!cancellation && shouldStop?.()) {
       cancellation = new Error('Transformer self-play arena cancelled.');
@@ -130,24 +144,33 @@ export async function evaluateCandidate({ candidate, incumbent, suite, pairs: re
     });
     try {
       const result = await Promise.race([
-        Promise.resolve().then(() => engine(position, { ...gameLimits, engine: 'transformer', shouldStop: () => Boolean(shouldStop?.() || cancellation) })),
+        Promise.resolve().then(() => {
+          checkStopped();
+          return engine(position, { ...gameLimits, engine: 'transformer', shouldStop: () => Boolean(cancellation || shouldStop?.()) });
+        }),
         interrupted,
       ]);
       if (result?.stoppedReason === 'cancelled') {
-        cancellation = new Error('Transformer self-play arena cancelled by an engine.');
+        cancellation ??= new Error('Transformer self-play arena cancelled by an engine.');
         cancellation.name = 'AbortError';
       }
       checkStopped();
       return result;
     } catch (error) {
-      if (error?.name === 'AbortError') cancellation = error;
+      if (error?.name === 'AbortError') cancellation ??= error;
       throw error;
     } finally { clearInterval(timer); }
   };
   const engineA = wrap(candidate), engineB = wrap(incumbent);
-  const games = [], paired = [], scheduledCases = [], skippedCases = [], seen = new Set();
+  const games = [], planned = [], pairPlans = [], scheduledCases = [], skippedCases = [], seen = new Set();
   const offset = seed % suite.cases.length;
-  for (let index = 0; index < suite.cases.length && paired.length < requestedPairs; index++) {
+  // Fix starts and both color assignments before dispatching any games, so
+  // completion timing cannot affect selection, game indices, or pair order.
+  checkStopped();
+  for (let index = 0; index < suite.cases.length && pairPlans.length < requestedPairs; index++) {
+    // Each certificate is bounded synchronous work. Yield between cases so
+    // cancellation signals and timers are observed during long preparations.
+    await yieldTurn();
     checkStopped();
     const fixture = suite.cases[(offset + index) % suite.cases.length];
     if (!fixture || typeof fixture.id !== 'string') throw new Error('Each arena case needs a string id.');
@@ -165,22 +188,44 @@ export async function evaluateCandidate({ candidate, incumbent, suite, pairs: re
     scheduledCases.push(fixture.id);
     const gameIndices = [];
     for (const aColor of [0, 1]) {
-      checkStopped();
-      const game = { caseId: fixture.id, category: fixture.category ?? null, seed,
-        ...await runGame({ position, engineA, engineB, aColor, ...limits }) };
-      checkStopped(); // runGame converts engine exceptions into invalid results.
-      gameIndices.push(games.length);
-      games.push(game);
-      if (onGame) await onGame(structuredClone(game));
-      checkStopped();
+      gameIndices.push(planned.length);
+      planned.push({ caseId: fixture.id, category: fixture.category ?? null, position, aColor });
     }
-    const pair = { caseId: fixture.id, seed, initialKey, gameIndices };
-    paired.push({ ...pair, ...pairDetails(pair, games) });
+    pairPlans.push({ caseId: fixture.id, seed, initialKey, gameIndices });
   }
+  let nextIndex = 0, completedCount = 0, streamTail = Promise.resolve();
+  async function lane() {
+    try {
+      while (nextIndex < planned.length) {
+        checkStopped();
+        const index = nextIndex++, { caseId, category, position, aColor } = planned[index];
+        const game = { caseId, category, seed, index,
+          ...await runGame({ position, engineA, engineB, aColor, ...limits }) };
+        checkStopped(); // runGame converts engine exceptions into invalid results.
+        games[index] = game;
+        const completed = ++completedCount;
+        if (onGame) {
+          const streaming = streamTail.then(async () => {
+            checkStopped();
+            await onGame(structuredClone(game), { index, completed, total: planned.length });
+            checkStopped();
+          });
+          // Handle writer failures immediately, interrupt other searches, and
+          // let each lane settle before the arena's caller closes its workers.
+          streamTail = streaming.catch(fail);
+          await streaming;
+        }
+      }
+    } catch (error) { fail(error); }
+  }
+  await Promise.all(Array.from({ length: Math.min(gameConcurrency, planned.length) }, () => lane()));
+  await streamTail;
+  if (failed) throw failure;
   checkStopped();
+  const paired = pairPlans.map(pair => ({ ...pair, ...pairDetails(pair, games) }));
   const decision = decidePromotion({ pairs: paired, games, minPairs, promotionScore });
   return { engines: { A: 'candidate', B: 'incumbent' }, suiteVersion: suite.version ?? null,
-    seed, requestedPairs, limits, scheduledCases, skippedCases,
+    seed, requestedPairs, gameConcurrency, limits, scheduledCases, skippedCases,
     games, pairs: paired, summary: { ...summarizeGames(games), totalPairs: paired.length,
       completePairs: paired.filter(pair => pair.complete).length,
       eligiblePairs: decision.eligiblePairs, uniqueStartingPositions: new Set(paired.map(pair => pair.initialKey)).size,

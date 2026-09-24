@@ -70,9 +70,15 @@ within this candidate tree. At depth one, every generated candidate receives a
 value. Root candidates and a bounded cache of **128 inner expansions** can be
 reused across iterations.
 
-Candidate generation still uses a deterministic prefix of the complete-turn
-generator. The cap can omit strong moves, including temporal moves, before the
-model sees them. This is selective search, so reaching a requested depth does
+Candidate generation prioritizes complete turns using only currently required
+boards. Turns that use optionally playable boards (future or inactive boards)
+come afterward, with board status recalculated after each component move.
+Optional moves remain legal candidates, including sequences that must play an
+optional board first to create a later temporal branch.
+
+Candidate generation still uses a deterministic prefix of this ordered
+complete-turn generator. The cap can omit strong moves, including temporal
+moves, before the model sees them. This is selective search, so reaching a requested depth does
 not mean all legal alternatives were evaluated. The analysis reports
 `searchPolicy: transformer-bounded-alpha-beta`, candidate caps, and alpha-beta
 `cutoffs`; `beamWidth` and `beamPruned` are no longer search options or result
