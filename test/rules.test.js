@@ -69,6 +69,26 @@ test('async action generation preserves optional-first temporal branches and pre
   assert.equal(new Set(keys(actions)).size, actions.length);
 });
 
+test('component ordering receives stable prefixes that reconstruct its partial position', async () => {
+  const start = position([[smallBoard()], null, [smallBoard(), smallBoard(), smallBoard()]]);
+  const expected = [...generateActions(start)];
+  for (const generate of [generateActions, generateActionsAsync]) {
+    const observed = [], actual = [];
+    for await (const candidate of generate(start, {
+      orderMoves(current, moves, prefix) {
+        assert.equal(positionKey(prefix.reduce(applyMove, start)), positionKey(current));
+        observed.push({ prefix, key: positionKey(current) });
+        return moves;
+      },
+    })) actual.push(candidate);
+    assert(observed.some(({ prefix }) => prefix.length > 0));
+    for (const { prefix, key } of observed) {
+      assert.equal(positionKey(prefix.reduce(applyMove, start)), key, 'later traversal must not mutate saved prefixes');
+    }
+    assert.deepEqual(actual, expected);
+  }
+});
+
 test('async ordering failures and cancellation propagate without a terminal result', async () => {
   const collect = async options => {
     const result = [];

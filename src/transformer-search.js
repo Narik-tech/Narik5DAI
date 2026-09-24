@@ -36,7 +36,7 @@ export async function analyze(position, options = {}) {
   let rootCandidates = null;
   let nodes = 0, searchNodes = 0, generationNodes = 0, evaluations = 0, inferenceBatches = 0;
   let depth = 0, searchingDepth = 0, selectiveDepth = 0, rootActionsSearched = 0;
-  let bestAction = null, pv = [], score = null, rootPartial = null;
+  let bestAction = null, pv = [], score = null, rootPartial = null, rootFallback = null;
   let completed = false, status = 'incomplete', stoppedReason = null;
   let mateProven = false;
   let candidateCaps = 0, cutoffs = 0, lastProgress = started;
@@ -56,6 +56,13 @@ export async function analyze(position, options = {}) {
       lastProgress = performance.now(); options.onProgress(snapshot());
     }
   }
+  function retainRootCandidate(moves, next, terminal = null) {
+    if (completed) return;
+    const value = terminal ? -terminal.score : valueCache.get(next) * rootSign;
+    if (Number.isFinite(value) && (!rootFallback || value > rootFallback.score)) {
+      rootFallback = { bestAction: moves, pv: [moves], score: value, mateProven: Boolean(terminal?.mateProven) };
+    }
+  }
   async function* iterator(pos, ply) {
     const generated = new Set();
     // Scores belong to a resulting history, not a move's coordinates: playing
@@ -64,12 +71,19 @@ export async function analyze(position, options = {}) {
     const partials = new Map();
     let hasOptionalMoves = false;
     const generationOptions = { tick, keyPosition, skipOptionalSpatial: false };
-    async function orderMoves(current, moves, requiredOnly = false) {
+    async function orderMoves(current, moves, prefix, requiredOnly = false) {
       // Time travel can change the present during a complete turn. Both
       // future active boards and inactive boards are optional source boards.
       const present = new Set(raw.boardFuncs.present(current.board, current.action));
       const pending = [], ordered = [];
+      const rootTurns = ply === 0 ? new Map() : null;
       for (const [index, move] of moves.entries()) {
+        const required = present.has(move[0][0]);
+        hasOptionalMoves ||= !required;
+        // The unrestricted pass scores optional continuations when needed.
+        // In particular, do no speculative work after a required-only turn
+        // is already submittable and every remaining source is optional.
+        if (requiredOnly && !required) continue;
         tick();
         const partial = applyMove(current, move), complete = canSubmit(partial);
         // A partial turn retains the mover; only the rules engine may decide
@@ -83,21 +97,31 @@ export async function analyze(position, options = {}) {
           partials.set(key, entry);
           if (!terminal) pending.push(successor);
         }
-        const required = present.has(move[0][0]);
-        hasOptionalMoves ||= !required;
         ordered.push({ move, entry, required, index });
+        if (rootTurns && entry.complete) {
+          // canSubmit certified the entire prefix plus this component. Keep
+          // completed batch values even if a later batch or generator tick
+          // interrupts before the complete candidate is yielded.
+          const turn = [...prefix, move];
+          rootTurns.set(entry.position, turn);
+          retainRootCandidate(turn, entry.position, entry.terminal);
+        }
       }
-      // Score every distinct alternative before selecting components, even
-      // when the full-turn cap is one. Reuse scores across commuting prefixes
-      // and the required-only/unrestricted passes, within service batch limits.
+      // Score each distinct alternative eligible in this pass before selecting
+      // components, even when the full-turn cap is one. Reuse scores across
+      // commuting prefixes and passes, within service batch limits.
       for (let offset = 0; offset < pending.length; offset += 128) {
-        await infer(pending.slice(offset, offset + 128));
+        const batch = pending.slice(offset, offset + 128);
+        await infer(batch);
+        if (rootTurns) for (const next of batch) {
+          const turn = rootTurns.get(next);
+          if (turn) retainRootCandidate(turn, next);
+        }
       }
       for (const { entry } of ordered) {
         entry.value ??= entry.terminal ? -entry.terminal.score : valueCache.get(entry.position) * sign(current);
       }
-      return ordered.filter(item => !requiredOnly || item.required)
-        .sort((a, b) => Number(b.required) - Number(a.required) || b.entry.value - a.entry.value || a.index - b.index)
+      return ordered.sort((a, b) => Number(b.required) - Number(a.required) || b.entry.value - a.entry.value || a.index - b.index)
         .map(item => item.move);
     }
     function reuseEvaluation(candidate) {
@@ -112,7 +136,7 @@ export async function analyze(position, options = {}) {
     // fill the candidate cap before the next required-board alternative.
     // Generate every required-only submission before considering those turns.
     for await (const candidate of generateActionsAsync(pos, { ...generationOptions,
-      orderMoves: (current, moves) => orderMoves(current, moves, true),
+      orderMoves: (current, moves, prefix) => orderMoves(current, moves, prefix, true),
     })) {
       generated.add(keyPosition(candidate.position));
       yield reuseEvaluation(candidate);
@@ -162,6 +186,14 @@ export async function analyze(position, options = {}) {
         if (ply === 0 && bestAction === null) {
           // A budget fallback is explicitly unscored until inference succeeds.
           bestAction = next.value.moves; pv = [bestAction];
+        }
+        if (ply === 0 && !completed) {
+          // A yielded candidate is a complete legal turn. Retain its known
+          // value now: assembling a later candidate can exhaust the budget.
+          // Partial component values must never become playable fallbacks.
+          const candidate = next.value;
+          const terminal = terminalCache.get(candidate.position) ? terminalValue(candidate.position, 1) : null;
+          retainRootCandidate(candidate.moves, candidate.position, terminal);
         }
       }
       if (terminalCache.get(pos)) exhaustive = true;
@@ -299,11 +331,12 @@ export async function analyze(position, options = {}) {
     stoppedReason ||= 'depth';
   } catch (error) {
     if (!(error instanceof SearchInterrupted)) throw error;
-    if (!completed && rootPartial) {
-      bestAction = rootPartial.bestAction; pv = rootPartial.pv;
+    const fallback = rootPartial ?? rootFallback;
+    if (!completed && fallback) {
+      bestAction = fallback.bestAction; pv = fallback.pv;
       // Partial iterations cannot certify a losing mate over unsearched moves.
-      score = rootPartial.score < -MATE_THRESHOLD ? -MATE_THRESHOLD + 1 : rootPartial.score;
-      mateProven = Math.abs(score) > MATE_THRESHOLD && Boolean(rootPartial.mateProven);
+      score = fallback.score < -MATE_THRESHOLD ? -MATE_THRESHOLD + 1 : fallback.score;
+      mateProven = Math.abs(score) > MATE_THRESHOLD && Boolean(fallback.mateProven);
     }
   }
   return snapshot();

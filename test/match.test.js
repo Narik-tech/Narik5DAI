@@ -127,6 +127,42 @@ test('a validated incomplete fallback remains playable and is counted in the rep
   assert.equal(summarizeGames([game]).incompleteSearchMoves, 1);
 });
 
+test('transformer diagnostics survive both played fallbacks and stopped searches', async () => {
+  const diagnostics = { engine: 'transformer', searchingDepth: 1, rootActionsSearched: 0,
+    selectiveDepth: 1, candidateLimit: 64, innerCandidateLimit: 16, candidateCaps: 1,
+    candidateCacheEntries: 0, evaluations: 12, inferenceBatches: 1, mateProven: false, terminalProof: null };
+  const engine = position => firstLegal(position, { ...diagnostics,
+    completed: false, status: 'incomplete', stoppedReason: 'time', score: 42, depth: 0 });
+  for (const playOnTimeLimit of [true, false]) {
+    const game = await runGame({ position: tiny(), ...options, maxPlies: 1,
+      playOnTimeLimit, engineA: engine, engineB: engine });
+    assert.equal(game.valid, true);
+    assert.equal(game.reason, playOnTimeLimit ? 'ply-limit' : 'time-limit');
+    assert.equal(game.plies, playOnTimeLimit ? 1 : 0);
+    const search = playOnTimeLimit ? game.moves[0].search : game.lastSearch;
+    for (const [key, value] of Object.entries(diagnostics)) {
+      assert(Object.hasOwn(search, key), `Missing recorded diagnostic: ${key}`);
+      assert.deepEqual(search[key], value, key);
+    }
+  }
+});
+
+test('classical searches retain depth diagnostics without inventing transformer fields', async () => {
+  let result;
+  const engine = position => { result = analyze(position, options); return result; };
+  const game = await runGame({ position: tiny(), ...options, maxPlies: 1, engineA: engine, engineB: engine });
+  assert.equal(game.valid, true);
+  assert.equal(game.plies, 1);
+  const search = game.moves[0].search;
+  for (const key of ['searchingDepth', 'rootActionsSearched', 'selectiveDepth']) {
+    assert.equal(search[key], result[key], key);
+  }
+  for (const key of ['engine', 'candidateLimit', 'innerCandidateLimit', 'candidateCaps',
+    'candidateCacheEntries', 'evaluations', 'inferenceBatches', 'mateProven', 'terminalProof']) {
+    assert.equal(Object.hasOwn(search, key), false, key);
+  }
+});
+
 test('time-budget play is explicit and does not forgive absent actions or policy stops', async () => {
   for (const completed of [true, false]) {
     const engine = position => firstLegal(position, { completed, status: completed ? 'ok' : 'incomplete',

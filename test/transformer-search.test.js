@@ -273,6 +273,7 @@ test('required-board alternatives fill the root cap before future or inactive bo
     });
     assert.equal(result.depth, 1);
     assert(seen.includes(favorite), 'the chosen required successor must be evaluated');
+    assert(seen.every(key => !optional.has(key)), 'optional continuations must not consume inference before the required-only cap is filled');
     assert.equal(usesOptionalBoard(position, result.bestAction), false);
     assert.equal(positionKey(validatePv(position, result)), favorite);
     assert.equal(positionKey(position), before);

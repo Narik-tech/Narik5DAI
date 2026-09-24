@@ -57,7 +57,8 @@ npm run analyze -- --engine transformer --time 3 --depth 3
 
 The transformer engine uses its own asynchronous search implementation. While
 the rules engine assembles a turn, the transformer evaluates every distinct
-partial-move successor at each visited prefix in GPU batches of at most 128.
+partial-move successor eligible in the current generation pass at each visited
+prefix in GPU batches of at most 128.
 It orders components by strength for the mover before applying the full-turn
 candidate cap. Incomplete turns retain the mover's action; only successors the
 rules engine permits submitting advance the action for evaluation. Scores are
@@ -72,6 +73,11 @@ converted to the mover's perspective for ordering and negamax alpha-beta search.
 Iterative deepening retains the best completed result, or an explicitly partial
 result if a time, work, or cancellation limit interrupts the search. A legal,
 unscored fallback is retained before the first model request when the budget permits.
+As complete legal root turns are scored, their evaluations replace that fallback
+with the best scored turn, even if a later batch or candidate is interrupted
+before the generator yields. This provisional result still reports depth zero and
+`completed: false`; incomplete component-turn scores never become playable
+recommendations. A completed iteration takes precedence over provisional results.
 
 Defaults retain up to **64 candidates per position**, at the root and in
 replies. Neural component ordering guides candidate membership; **every admitted candidate
@@ -84,6 +90,10 @@ reused across iterations.
 Candidate generation prioritizes complete turns using only currently required
 boards. Turns that use optionally playable boards (future or inactive boards)
 come afterward, with board status recalculated after each component move.
+During the required-board pass, optional components are filtered before applying,
+probing or evaluating them. Once a required-only turn can be submitted, this pass
+does no evaluation of optional extensions. Optional components are scored when
+the unrestricted pass actually reaches them.
 Optional moves remain legal candidates, including sequences that must play an
 optional board first to create a later temporal branch.
 

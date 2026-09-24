@@ -370,10 +370,12 @@ export function validateAction(position, moves) {
  * Search can omit ordinary moves on optional boards; default rule enumeration
  * remains exhaustive. Recompute the present after every component move because
  * time travel can change which timelines are active and required.
+ * orderMoves(current, moves, prefix) receives a copy of the component prefix
+ * leading from the initial position to current, without submitting the turn.
  */
 export function* generateActions(position, options = {}) {
   const steps = generateActionSteps(position, options);
-  const orderMoves = options.orderMoves ?? ((_position, moves) => moves);
+  const orderMoves = options.orderMoves;
   try {
     let step = steps.next();
     while (!step.done) {
@@ -381,17 +383,17 @@ export function* generateActions(position, options = {}) {
         yield step.value.candidate;
         step = steps.next();
       } else {
-        const { current, moves } = step.value;
-        step = steps.next(orderMoves(current, moves));
+        const { current, moves, prefix } = step.value;
+        step = steps.next(orderMoves ? orderMoves(current, moves, prefix.slice()) : moves);
       }
     }
   } finally { steps.return?.(); }
 }
 
-/** The same legal traversal, with an awaitable component-move ordering hook. */
+/** The same legal traversal, with an awaitable orderMoves(current, moves, prefix) hook. */
 export async function* generateActionsAsync(position, options = {}) {
   const steps = generateActionSteps(position, options);
-  const orderMoves = options.orderMoves ?? ((_position, moves) => moves);
+  const orderMoves = options.orderMoves;
   try {
     let step = steps.next();
     while (!step.done) {
@@ -399,8 +401,8 @@ export async function* generateActionsAsync(position, options = {}) {
         yield step.value.candidate;
         step = steps.next();
       } else {
-        const { current, moves } = step.value;
-        step = steps.next(await orderMoves(current, moves));
+        const { current, moves, prefix } = step.value;
+        step = steps.next(orderMoves ? await orderMoves(current, moves, prefix.slice()) : moves);
       }
     }
   } finally { steps.return?.(); }
@@ -477,7 +479,7 @@ function* generateActionSteps(position, { tick = () => {}, preferredAction = nul
       const active = raw.boardFuncs.active(current.board);
       if (!availableMoves(current, false).some(move => !active.includes(move[0][0]) && isTacticalMove(current, move))) return;
     }
-    const orderedMoves = yield { current, moves };
+    const orderedMoves = yield { current, moves, prefix: path };
     for (const move of orderedMoves) {
       tick();
       path.push(move);

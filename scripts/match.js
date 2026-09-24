@@ -44,8 +44,11 @@ function limitsFor(options) {
 function recordSearch(result) {
   return Object.fromEntries([
     'bestAction', 'pv', 'status', 'completed', 'stoppedReason', 'score', 'scoreType', 'mateIn',
-    'depth', 'effectiveQuiescenceDepth', 'nodes', 'searchNodes', 'generationNodes', 'qnodes',
+    'engine', 'depth', 'searchingDepth', 'rootActionsSearched', 'selectiveDepth',
+    'effectiveQuiescenceDepth', 'nodes', 'searchNodes', 'generationNodes', 'qnodes',
     'ttHits', 'qTtHits', 'cutoffs', 'searchPolicy', 'policyLeaves', 'elapsedMs', 'limits',
+    'candidateLimit', 'innerCandidateLimit', 'candidateCaps', 'candidateCacheEntries',
+    'evaluations', 'inferenceBatches', 'mateProven', 'terminalProof',
   ].filter(key => result[key] !== undefined).map(key => [key, structuredClone(result[key])]));
 }
 
