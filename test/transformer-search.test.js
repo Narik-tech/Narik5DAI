@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { analyze, MATE_SCORE } from '../src/transformer-search.js';
-import { createPosition, generateActions, positionKey, validateAction } from '../src/rules.js';
+import { createPosition, formatAction, generateActions, positionKey, validateAction } from '../src/rules.js';
 
 const limits = { timeMs: 10000, maxNodes: 100000, maxDepth: 1 };
 const zero = async positions => positions.map(() => 0);
@@ -49,6 +49,31 @@ test('Black minimizes the White-perspective neural value', async () => {
   assert.deepEqual(result.bestAction, favorite.moves);
   assert.equal(result.score, -475);
   validatePv(position, result);
+});
+
+test('turn-zero continuations agree after submitting d4 at the same remaining depth', async () => {
+  const position = createPosition({ variant: 'turn_zero' });
+  const d4 = firstActions(position, 64).find(candidate => formatAction(position, candidate.moves) === '(0T1)d4');
+  const replies = firstActions(d4.position, 64);
+  const replyValues = new Map([['(0T1)e5', -50], ['(0T1)h5', -100], ['(0T1)Nf6', -500]]);
+  const values = new Map([[positionKey(d4.position), 1000], ...replies.map(candidate => [
+    positionKey(candidate.position), replyValues.get(formatAction(d4.position, candidate.moves)) ?? 100,
+  ])]);
+  const evaluateBatch = async positions => positions.map(pos => values.get(positionKey(pos)) ?? -1000);
+
+  for (const [candidateOptions, expectedReply] of [[{}, '(0T1)Nf6'], [{ candidateLimit: 12 }, '(0T1)e5']]) {
+    const options = { ...limits, ...candidateOptions, evaluateBatch };
+    const initial = await analyze(position, { ...options, maxDepth: 2 });
+    const submitted = validateAction(position, d4.moves);
+    const continuation = await analyze(submitted, { ...options, maxDepth: 1 });
+    assert.equal(initial.depth, 2);
+    assert.equal(continuation.depth, 1);
+    assert.deepEqual(initial.bestAction, d4.moves);
+    assert.equal(formatAction(submitted, continuation.bestAction), expectedReply);
+    assert.deepEqual(initial.pv.slice(1), continuation.pv);
+    assert.equal(initial.score, continuation.score);
+    validatePv(position, initial);
+  }
 });
 
 test('iterative beam search respects depth and returns full-turn legal PV', async () => {

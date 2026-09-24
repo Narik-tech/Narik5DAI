@@ -17,7 +17,7 @@ const fs = require('node:fs/promises');
     browser = await chromium.launch({ headless: true, ...(process.env.CHROME_PATH ? { executablePath: process.env.CHROME_PATH } : {}) });
     const page = await browser.newPage({ viewport: { width: 1440, height: 1100 } });
     const errors = [], requests = [], neuralJobs = new Set();
-    let available = false, holdSearch = true, releasePoll, startedPoll, stoppedSearch, finishedPoll;
+    let available = false, holdSearch = true, innerCandidateLimit = 64, releasePoll, startedPoll, stoppedSearch, finishedPoll;
     const pollStarted = new Promise(resolve => { startedPoll = resolve; });
     const searchStopped = new Promise(resolve => { stoppedSearch = resolve; });
     const pollFinished = new Promise(resolve => { finishedPoll = resolve; });
@@ -55,7 +55,7 @@ const fs = require('node:fs/promises');
       const data = await response.json();
       if (data.result) Object.assign(data.result, {
         engine:'transformer', contextTruncated:true, frontierTruncated:true,
-        limits:{...data.result.limits, candidateLimit:64},
+        limits:{...data.result.limits, candidateLimit:64, innerCandidateLimit, beamWidth:4},
         model:{device:'cuda:0', config:{max_tokens:1024}},
       });
       await route.fulfill({ response, json:data });
@@ -107,10 +107,13 @@ const fs = require('node:fs/promises');
     await page.waitForFunction(() => !document.getElementById('play-button').disabled, null, {timeout:15000});
     assert.match(await page.locator('#stat-cache').textContent(), /cuda:0/);
     const note = await page.locator('#analysis-note').textContent();
-    assert.match(note, /64 root candidate turns/);
+    assert.match(note, /64 candidate turns per position; best 4 deepened/);
     assert.match(note, /1024 tokens/);
     assert.match(note, /Historical context was truncated/);
     assert.match(note, /current-board features were omitted/);
+    innerCandidateLimit = 16;
+    await page.locator('#analyze-button').click();
+    await page.locator('#analysis-note').filter({hasText:'64 root / 16 reply candidate turns; best 4 deepened'}).waitFor();
     await page.locator('#engine-select').selectOption('classical');
     await page.waitForFunction(() => document.getElementById('best-move').hidden);
     assert.equal(await page.locator('#play-button').isDisabled(), true, 'Switching clears completed recommendations.');

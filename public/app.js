@@ -352,9 +352,17 @@ function renderAnalysis() {
   renderResourceStats(result);
   let note = running && result ? `Searching depth ${result.searchingDepth ?? result.depth} · ${result.rootActionsSearched ?? 0} root turns compared` : !running && result?.stoppedReason === 'policy' ? 'Legal turns exist, but none satisfy the search restriction on optional boards. Play a turn manually.' : !running && result?.stoppedReason === 'nodes' ? 'Node limit reached. Increase Max nodes to search further within your think time.' : !running && search?.result && !result.completed ? Number.isFinite(score) ? 'Partial search; no full depth completed. Allow more think time for a deeper comparison.' : result.bestAction ? 'A legal fallback is available. Allow more think time to evaluate alternatives.' : 'No recommendation is available within the search limits.' : '';
   if (search?.engine === 'transformer' && result) {
-    const candidateLimit = result.limits?.candidateLimit;
+    const candidateLimit = result.candidateLimit ?? result.limits?.candidateLimit;
+    const innerCandidateLimit = result.innerCandidateLimit ?? result.limits?.innerCandidateLimit;
+    const beamWidth = result.beamWidth ?? result.limits?.beamWidth;
     const tokenLimit = result.model?.config?.max_tokens;
-    const details = [Number.isFinite(candidateLimit) ? `Selective transformer search; up to ${candidateLimit} root candidate turns.` : 'Selective transformer search; candidate turns are capped.'];
+    let candidateScope = 'candidate turns are capped';
+    if (Number.isFinite(candidateLimit)) {
+      candidateScope = Number.isFinite(innerCandidateLimit)
+        ? candidateLimit === innerCandidateLimit ? `up to ${candidateLimit} candidate turns per position` : `up to ${candidateLimit} root / ${innerCandidateLimit} reply candidate turns`
+        : `up to ${candidateLimit} root candidate turns`;
+    }
+    const details = [`Selective transformer search; ${candidateScope}${Number.isFinite(beamWidth) ? `; best ${beamWidth} deepened` : ''}.`];
     if (Number.isFinite(tokenLimit)) details.push(`Model context: ${tokenLimit} tokens.`);
     if (result.contextTruncated) details.push('Historical context was truncated for the model. Full history still determines legality.');
     if (result.frontierTruncated) details.push('The position exceeds model context; some current-board features were omitted.');

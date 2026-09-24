@@ -9,7 +9,7 @@ class SearchInterrupted extends Error {}
 
 /**
  * Neural value search over complete legal submissions. The first candidateLimit
- * root actions and innerCandidateLimit replies are scored in GPU-friendly
+ * actions at each position are scored in GPU-friendly
  * batches; only the best beamWidth candidates are deepened. This is a bounded,
  * selective search, not exhaustive minimax. Values are always White centipawns.
  * The evaluator is required: no classical evaluation replaces a missing model.
@@ -21,7 +21,11 @@ export async function analyze(position, options = {}) {
   const maxDepth = Math.floor(finite(options.maxDepth, 4, 1, 64));
   const maxNodes = Math.floor(finite(options.maxNodes, 200_000, 0, 1_000_000_000));
   const candidateLimit = Math.floor(finite(options.candidateLimit, 64, 1, 256));
-  const innerCandidateLimit = Math.floor(finite(options.innerCandidateLimit, 16, 1, 64));
+  // The same position must see the same candidate set when it becomes the
+  // root. A smaller default for replies excluded every opening knight move
+  // for Black (the first 16 generated actions are pawn moves). Advanced callers
+  // may still opt into a different reply cap, accepting that asymmetry.
+  const innerCandidateLimit = Math.floor(finite(options.innerCandidateLimit, candidateLimit, 1, 256));
   const beamWidth = Math.floor(finite(options.beamWidth, 4, 1, 32));
   const maxCachedPositions = Math.floor(finite(options.maxCachedPositions, 128, 0, 512));
   const deadline = started + timeMs, rootSign = sign(position);

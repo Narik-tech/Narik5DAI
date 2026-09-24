@@ -62,8 +62,8 @@ scores are converted to the side-to-move perspective for ranking and negamax
 backups. Iterative deepening retains the best completed result, or an explicitly
 partial result if a time, work, or cancellation limit interrupts the search.
 
-Defaults retain the first **64 root candidates**, the first **16 candidates per
-inner position**, and deepen the best **4** ranked continuations at each node.
+Defaults retain the first **64 candidates per position**, at the root and in
+replies, and deepen the best **4** ranked continuations at each node.
 At depth one, every generated candidate receives a value. Root candidates and
 a bounded cache of **128 inner expansions** can be reused across iterations.
 Candidate generation uses a deterministic prefix of the complete-turn generator;
@@ -72,6 +72,14 @@ This is selective search, so reaching a requested depth does not mean all legal
 alternatives were evaluated. The analysis reports candidate caps and beam
 pruning. The UI's classical transposition-cache setting applies only to the
 classical engine; transformer candidate storage has its own bounds.
+
+The default reply cap follows `candidateLimit`, so moving a position from a
+continuation to the root keeps its candidate coverage. Advanced callers can
+override `innerCandidateLimit`; a smaller reply cap can produce a different
+line when that position is analyzed directly. To compare continuations, use the
+same checkpoint and search settings, and compare completed depth **D** before
+the move with completed depth **D − 1** after it. Max depth is only a ceiling;
+time and work limits can stop either search earlier.
 
 Terminal checks use full legal generation. Mate is certified only where the
 necessary continuations and opposing replies have been proved: a single
