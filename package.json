@@ -11,6 +11,7 @@
     "analyze": "node src/cli.js",
     "test": "node --test",
     "benchmark": "node scripts/benchmark.js",
+    "benchmark:parallel": "node scripts/benchmark-parallel.js",
     "strength": "node scripts/strength.js",
     "match": "node scripts/match.js",
     "selfplay": "node scripts/selfplay.js",

@@ -1,5 +1,5 @@
 import { parentPort, workerData } from 'node:worker_threads';
-import { analyze } from './search.js';
+import { analyze } from './parallel-search.js';
 import { formatAction, validateAction } from './rules.js';
 
 let contextTruncated = false, frontierTruncated = false;

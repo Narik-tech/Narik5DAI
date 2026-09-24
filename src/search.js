@@ -44,7 +44,7 @@ function historyKey(position, move) {
  * `nodes` includes generator work ticks, making maxNodes deterministic even
  * when finding one legal multiboard action takes considerable work.
  */
-export function analyze(position, options = {}) {
+export function createSearchSession(position, options = {}) {
   const started = performance.now();
   const timeMs = finiteOption(options.timeMs, 3000, 0, 3_600_000);
   const maxDepth = Math.floor(finiteOption(options.maxDepth, 8, 1, 64));
@@ -71,6 +71,7 @@ export function analyze(position, options = {}) {
     if (nodes >= maxNodes) { interruption = 'nodes'; throw new SearchInterrupted(); }
     const now = performance.now();
     if (now >= deadline) { interruption = 'time'; throw new SearchInterrupted(); }
+    if (options.claimNode && !options.claimNode(kind)) { interruption = 'nodes'; throw new SearchInterrupted(); }
     nodes++;
     if (kind === 'generation') generationNodes++;
     else { searchNodes++; if (kind === 'quiescence') qnodes++; }
@@ -284,50 +285,91 @@ export function analyze(position, options = {}) {
       limits: { timeMs, maxDepth, maxNodes, quiescenceDepth: qDepth, cacheMemoryMb, maxTableEntries }
     };
   }
-  try {
-    const fallbackIterator = actions(position, null, 0);
-    const fallback = fallbackIterator.next();
-    fallbackIterator.return?.();
-    if (fallback.done) {
-      const result = emptyResult(position, 0, fallbackIterator);
-      if (result.policy) interruption = 'policy';
-      else { score = result.score; status = score ? 'checkmate' : 'stalemate'; completed = true; }
-      return snapshot();
+  function* iterations() {
+    try {
+      const fallbackIterator = actions(position, null, 0);
+      const fallback = fallbackIterator.next();
+      fallbackIterator.return?.();
+      if (fallback.done) {
+        const result = emptyResult(position, 0, fallbackIterator);
+        if (result.policy) interruption = 'policy';
+        else { score = result.score; status = score ? 'checkmate' : 'stalemate'; completed = true; }
+        return snapshot();
+      }
+      bestAction = fallback.value.moves; pv = [bestAction];
+      // A legal fallback is valuable even if the first recursive iteration cannot
+      // finish; its score stays explicitly unavailable until a child is searched.
+      const iterations = [];
+      // First broaden capture analysis at depth one; then deepen full turns. A
+      // quiet warmup alone can overvalue a defended capture, so finish q1 before
+      // investing in a much larger depth-two multiverse tree.
+      if (options.quiescenceWarmup !== false) {
+        for (let horizon = 0; horizon < qDepth; horizon++) iterations.push({ depth: 1, horizon });
+      }
+      for (let currentDepth = 1; currentDepth <= maxDepth; currentDepth++) iterations.push({ depth: currentDepth, horizon: qDepth });
+      for (const iteration of iterations) {
+        const currentDepth = iteration.depth;
+        searchingDepth = currentDepth;
+        activeQDepth = iteration.horizon;
+        rootPartial = null;
+        const window = currentDepth > 1 && Math.abs(score ?? 0) < MATE_THRESHOLD ? 60 : INF;
+        const lower = window === INF ? -INF : score - window;
+        const upper = window === INF ? INF : score + window;
+        let result = yield { remaining: currentDepth, horizon: activeQDepth, alpha: lower, beta: upper, preferred: bestAction };
+        if (result.score <= lower || result.score >= upper) result = yield { remaining: currentDepth, horizon: activeQDepth, alpha: -INF, beta: INF, preferred: result.pv[0] || bestAction };
+        score = result.score; depth = currentDepth; pv = result.pv; bestAction = pv[0] || bestAction;
+        completedQDepth = activeQDepth;
+        completed = true; status = 'ok';
+        lastProgress = performance.now();
+        options.onProgress?.(snapshot());
+        if (Math.abs(score) >= MATE_SCORE - currentDepth) { interruption = 'mate'; break; }
+      }
+      if (!interruption) interruption = 'depth';
+    } catch (error) {
+      if (!(error instanceof SearchInterrupted)) throw error;
+      if (!completed && rootPartial) {
+        bestAction = rootPartial.bestAction; score = rootPartial.score; pv = rootPartial.pv;
+      }
     }
-    bestAction = fallback.value.moves; pv = [bestAction];
-    // A legal fallback is valuable even if the first recursive iteration cannot
-    // finish; its score stays explicitly unavailable until a child is searched.
-    const iterations = [];
-    // First broaden capture analysis at depth one; then deepen full turns. A
-    // quiet warmup alone can overvalue a defended capture, so finish q1 before
-    // investing in a much larger depth-two multiverse tree.
-    if (options.quiescenceWarmup !== false) {
-      for (let horizon = 0; horizon < qDepth; horizon++) iterations.push({ depth: 1, horizon });
-    }
-    for (let currentDepth = 1; currentDepth <= maxDepth; currentDepth++) iterations.push({ depth: currentDepth, horizon: qDepth });
-    for (const iteration of iterations) {
-      const currentDepth = iteration.depth;
-      searchingDepth = currentDepth;
-      activeQDepth = iteration.horizon;
-      rootPartial = null;
-      const window = currentDepth > 1 && Math.abs(score ?? 0) < MATE_THRESHOLD ? 60 : INF;
-      const lower = window === INF ? -INF : score - window;
-      const upper = window === INF ? INF : score + window;
-      let result = negamax(position, currentDepth, lower, upper, 0, bestAction);
-      if (result.score <= lower || result.score >= upper) result = negamax(position, currentDepth, -INF, INF, 0, result.pv[0] || bestAction);
-      score = result.score; depth = currentDepth; pv = result.pv; bestAction = pv[0] || bestAction;
-      completedQDepth = activeQDepth;
-      completed = true; status = 'ok';
-      lastProgress = performance.now();
-      options.onProgress?.(snapshot());
-      if (Math.abs(score) >= MATE_SCORE - currentDepth) { interruption = 'mate'; break; }
-    }
-    if (!interruption) interruption = 'depth';
-  } catch (error) {
-    if (!(error instanceof SearchInterrupted)) throw error;
-    if (!completed && rootPartial) {
-      bestAction = rootPartial.bestAction; score = rootPartial.score; pv = rootPartial.pv;
-    }
+    return snapshot();
   }
-  return snapshot();
+
+  // Both drivers use the same recursive search, ordering and bound semantics.
+  // A worker keeps this context alive across jobs and iterative depths.
+  return {
+    iterations, snapshot,
+    root: request => negamax(position, request.remaining, request.alpha, request.beta, 0, request.preferred),
+    subtree(request) {
+      activeQDepth = request.horizon;
+      return negamax(request.position, request.remaining, request.alpha, request.beta, request.ply, request.preferred);
+    },
+    beginRoot(request) {
+      rootActionsSearched = 0;
+      rootPartial = null;
+      tick('search');
+      return actions(position, request.preferred, 0);
+    },
+    acceptRoot(candidate, child, count) {
+      rootActionsSearched = count;
+      const value = -child.score;
+      if (!rootPartial || value > rootPartial.score) {
+        rootPartial = { score: value, bestAction: candidate.moves, pv: [candidate.moves, ...child.pv] };
+      }
+    },
+    emptyRoot: iterator => emptyResult(position, 0, iterator),
+    interrupt(reason) { interruption = reason; return new SearchInterrupted(); },
+    isInterrupted: error => error instanceof SearchInterrupted,
+  };
+}
+
+export function analyze(position, options = {}) {
+  const session = createSearchSession(position, options), iterations = session.iterations();
+  let step = iterations.next();
+  while (!step.done) {
+    let result;
+    try { result = session.root(step.value); }
+    catch (error) { return iterations.throw(error).value; }
+    step = iterations.next(result);
+  }
+  return step.value;
 }

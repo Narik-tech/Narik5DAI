@@ -58,20 +58,30 @@ npm run analyze -- --engine transformer --time 3 --depth 3
 The transformer engine uses its own asynchronous search implementation. It
 generates complete legal turns with the same full rules as the classical engine,
 then evaluates their successor positions in GPU batches. White-relative neural
-scores are converted to the side-to-move perspective for ranking and negamax
-backups. Iterative deepening retains the best completed result, or an explicitly
+scores are converted to the side-to-move perspective for move ordering and
+negamax alpha-beta search. Iterative deepening retains the best completed result, or an explicitly
 partial result if a time, work, or cancellation limit interrupts the search.
 
 Defaults retain the first **64 candidates per position**, at the root and in
-replies, and deepen the best **4** ranked continuations at each node.
-At depth one, every generated candidate receives a value. Root candidates and
-a bounded cache of **128 inner expansions** can be reused across iterations.
-Candidate generation uses a deterministic prefix of the complete-turn generator;
-the cap can omit temporal moves, and beam pruning can discard a winning line.
-This is selective search, so reaching a requested depth does not mean all legal
-alternatives were evaluated. The analysis reports candidate caps and beam
-pruning. The UI's classical transposition-cache setting applies only to the
+replies. The neural evaluator orders these candidates; **every admitted candidate
+is eligible for deeper search**, with no fixed best-four beam. Alpha-beta skips
+branches only when the search bounds show that they cannot improve the choice
+within this candidate tree. At depth one, every generated candidate receives a
+value. Root candidates and a bounded cache of **128 inner expansions** can be
+reused across iterations.
+
+Candidate generation still uses a deterministic prefix of the complete-turn
+generator. The cap can omit strong moves, including temporal moves, before the
+model sees them. This is selective search, so reaching a requested depth does
+not mean all legal alternatives were evaluated. The analysis reports
+`searchPolicy: transformer-bounded-alpha-beta`, candidate caps, and alpha-beta
+`cutoffs`; `beamWidth` and `beamPruned` are no longer search options or result
+fields. The UI's classical transposition-cache setting applies only to the
 classical engine; transformer candidate storage has its own bounds.
+
+The wider search can complete fewer turns of depth within the same time or work
+budget. This search change uses the existing value network and checkpoint; no
+new training or move-policy head is required.
 
 The default reply cap follows `candidateLimit`, so moving a position from a
 continuation to the root keeps its candidate coverage. Advanced callers can

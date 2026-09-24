@@ -102,6 +102,32 @@ test('analysis rejects out-of-range and malformed resource budgets', async t => 
     assert.equal(response.status, 400, `Accepted cacheMemoryMb ${JSON.stringify(cacheMemoryMb)}`);
     assert.match(response.data.error, /Cache memory must be an integer/);
   }
+  for (const threads of [0, -1, 1.5, 17, null, true, '', []]) {
+    const response = await request('/api/analyze', { threads });
+    assert.equal(response.status, 400, `Accepted threads ${JSON.stringify(threads)}`);
+    assert.match(response.data.error, /Search threads must be an integer/);
+  }
+});
+
+test('parallel analysis accepts a thread count and keeps node and cache limits global', async t => {
+  const { request } = await fixture(t);
+  const created = await request('/api/analyze', {
+    timeMs: 1500, maxDepth: 2, quiescenceDepth: 0, threads: 2, maxNodes: 10000, cacheMemoryMb: 16,
+  });
+  assert.equal(created.status, 202, created.data.error);
+  let job;
+  const deadline = Date.now() + 8000;
+  do {
+    await delay(20);
+    job = (await request(`/api/analysis/${created.data.jobId}`)).data;
+  } while (job.status === 'running' && Date.now() < deadline);
+  assert.equal(job.status, 'done', job.error);
+  assert.ok(Array.isArray(job.result.bestAction));
+  assert.equal(job.result.limits.threads, 2);
+  assert.equal(job.result.limits.maxNodes, 10000);
+  assert.equal(job.result.limits.cacheMemoryMb, 16);
+  assert.ok(job.result.nodes <= 10000);
+  assert.ok(job.result.cacheMemoryBytes <= 16 * 1024 * 1024);
 });
 
 test('stopping a long search returns an interrupted result and preserves the position', async t => {

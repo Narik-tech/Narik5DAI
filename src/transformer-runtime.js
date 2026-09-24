@@ -31,7 +31,7 @@ export class TransformerRuntime {
     return {
       id: 'transformer', name: 'Transformer', available: !missing && !this.closed,
       status: missing ? 'setup-required' : this.state,
-      description: 'Experimental transformer value network with bounded full-turn beam search.',
+      description: 'Experimental transformer value network with ordered alpha-beta search over bounded full-turn candidates.',
       error: missing || this.error || undefined, model: this.info?.model, device: this.info?.device,
     };
   }

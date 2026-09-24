@@ -19,6 +19,8 @@ Open **http://127.0.0.1:5173**. Everything runs on your computer. No API key, cl
 
 Choose the engine in the Engine panel. The selection and resource settings are saved in your browser and apply to analysis and automatic engine replies. Switching engines cancels the current analysis and clears its recommendation. **Max nodes** (1–1,000,000,000), think time, and depth bound search; reaching the node limit is shown below the results. **Search cache (RAM)** (Off or 16 MiB–4 GiB) applies to Classical search, where a full cache evicts old entries while search continues.
 
+**Search threads** selects 1, 2, 4, 8, or 16 CPU threads for Classical search. One thread remains the default. Multiple threads share the time, node, and cache budgets and search different complete-turn branches after depth-one warmup. Worker startup, copied history, and duplicated work can outweigh the gain on small searches; compare 1, 2, and 4 on your positions with `npm run benchmark:parallel`. See [parallel search behavior and measurements](docs/performance.md#parallel-cpu-search).
+
 Classical search does not allocate GPU VRAM. Profiling found rule generation and history handling to dominate its runtime; its small, sequential evaluations do not provide enough batched work to justify GPU transfers. See [the classical engine performance and GPU assessment](docs/performance.md). The cache control caps estimated RAM retained for saved search results, including full position-history keys and move arrays; total process memory is higher. The selected amount is a budget, not an up-front allocation. Results display estimated cache usage against that budget. Choose Off to disable the cache.
 
 To prepare the transformer, run these commands from the project folder, then select **Transformer · experimental** and choose **Refresh** in the UI:
@@ -44,6 +46,7 @@ Import/export uses **5DPGN** and **5DFEN**, not ordinary chess FEN. An import pr
 
 ```sh
 node src/cli.js --time 30 --depth 10
+node src/cli.js --time 30 --depth 10 --threads 4
 node src/cli.js --file examples/opening.5dpgn --time 10 --json
 node src/cli.js --variant two_timelines --time 10 --play
 node src/cli.js --help
@@ -75,11 +78,14 @@ if (result.bestAction !== null) {
 
 `analyze` is synchronous; call it in a worker if your application has an event loop to keep responsive. `src/worker.js` shows cancellation with shared memory. An action is an ordered array of raw piece moves. Coordinates are `[timelineIndex, halfTurnIndex, rankIndex, fileIndex]`. Read [the rules and compatibility notes](docs/rules.md) before using raw coordinates.
 
+For parallel Classical search, import `analyze` from `src/parallel-search.js` and `await analyze(position, { threads: 4, timeMs: 5000, maxDepth: 8 })`. The existing synchronous `src/search.js` API remains single-threaded. The parallel API accepts 1–16 threads, reports the requested count in `limits.threads` and the count actually activated in `threadsUsed`, and closes its workers before resolving. Search still performs synchronous work on its calling thread; the app and CLI run it in their existing background worker. Parallel scheduling can change tied moves and results at interrupted work budgets; one thread retains deterministic work-budget behavior.
+
 ## Verification
 
 ```sh
 npm test
 npm run benchmark
+npm run benchmark:parallel
 npm run strength -- --nodes 50000 --repeat 2 --strict
 npm run match -- --engine-a src/search.js --engine-b path/to/baseline/search.js --nodes 10000 --plies 40 --output artifacts/match.json
 npm run selfplay
@@ -108,7 +114,7 @@ For longer diagnostics, set `BENCH_TIME_MS`, `SELFPLAY_TIME_MS`, or `SELFPLAY_PL
 - **No false mate from a timer:** mate/stalemate is classified only after exhaustive legal-action enumeration. The upstream eager action enumerator and timeout-based mate getters are bypassed.
 - **Evaluation:** weighted frontier material, development, mobility, pawn structure, king exposure, temporal pressure, and weaknesses across timelines. Temporal pressure follows the pinned movement vectors, including directional pawn/brawn captures and royal and fairy pieces, respects historical blockers and missing boards, and connects only matching half-turn colors. Historical material is not repeatedly counted. Direct royal pressure samples six past snapshots; king-zone protection also retains the first snapshot of each half-turn color. Weights are hand tuned and not statistically calibrated.
 - **Search:** no beam cap or chess null-move assumption in normal-depth search. Ordinary moves on optional boards are deliberately excluded, including captures, promotions, and castling. Quiescence uses the same policy and searches captures/promotions up to its configured limit. If checked at that limit, it evaluates permitted legal evasions for one further turn, including terminal detection after the evasion. An exhausted restricted tree is checked against full rules before classifying mate/stalemate; a policy-limited root returns no recommendation and `stoppedReason: policy`. This selective search and finite horizon can miss tactics. Time budgets can expire before depth one on a large multiverse.
-- **Transformer:** a separate experimental engine uses learned evaluation, bounded model context, and selective candidate search. Its context and candidate limits can miss information and tactics; trained strength is unmeasured. See [the transformer guide](docs/transformer.md).
+- **Transformer:** a separate experimental engine uses learned evaluation and move ordering with alpha-beta search over bounded candidates. Every admitted candidate is eligible for deeper search; there is no fixed beam. Its context and candidate limits can miss information and tactics; trained strength is unmeasured. See [the transformer guide](docs/transformer.md).
 - **Compatibility:** the pinned community rules implementation is not an official Thunkspace engine. Regression coverage is substantial but cannot certify every Steam variant. There is no live Steam integration, opening book, tablebase, repetition adjudication, or distributed search.
 
 For further strength measurement, expand the tactical suite and run paired engine matches before tuning evaluation weights. More search time is useful, but no finite setting guarantees optimal play.

@@ -15,7 +15,7 @@ function firstLegal(position, overrides = {}) {
   finally { iterator.return(); }
   return { engine: 'transformer', bestAction: action, pv: action ? [action] : [], completed: true,
     status: 'ok', score: 250, depth: 1, nodes: 2, searchNodes: 1, generationNodes: 1, stoppedReason: 'depth',
-    searchPolicy: 'transformer-bounded-beam', ...overrides };
+    searchPolicy: 'transformer-bounded-alpha-beta', ...overrides };
 }
 function mateStarts() {
   const white = createPosition({ pgn: '[Board "Custom"]\n[Size "4x4"]\n[Promotions "Q,R,B,N"]\n[3k/1P2/4/K3:0:1:w]' });

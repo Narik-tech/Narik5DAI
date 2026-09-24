@@ -9,9 +9,11 @@ class SearchInterrupted extends Error {}
 
 /**
  * Neural value search over complete legal submissions. The first candidateLimit
- * actions at each position are scored in GPU-friendly
- * batches; only the best beamWidth candidates are deepened. This is a bounded,
- * selective search, not exhaustive minimax. Values are always White centipawns.
+ * actions at each position are scored in GPU-friendly batches, then searched
+ * in neural-value order with alpha-beta. Every generated candidate is eligible
+ * for deepening; only a search bound can cut off the remaining alternatives.
+ * Candidate caps still make this selective, not exhaustive full-rule minimax.
+ * Values are always White centipawns.
  * The evaluator is required: no classical evaluation replaces a missing model.
  */
 export async function analyze(position, options = {}) {
@@ -26,18 +28,18 @@ export async function analyze(position, options = {}) {
   // for Black (the first 16 generated actions are pawn moves). Advanced callers
   // may still opt into a different reply cap, accepting that asymmetry.
   const innerCandidateLimit = Math.floor(finite(options.innerCandidateLimit, candidateLimit, 1, 256));
-  const beamWidth = Math.floor(finite(options.beamWidth, 4, 1, 32));
   const maxCachedPositions = Math.floor(finite(options.maxCachedPositions, 128, 0, 512));
   const deadline = started + timeMs, rootSign = sign(position);
   const keyPosition = createPositionKeyCache();
   const candidateCache = new Map(), terminalCache = new WeakMap(), valueCache = new WeakMap();
+  const preferredActions = new WeakMap();
   let rootCandidates = null;
   let nodes = 0, searchNodes = 0, generationNodes = 0, evaluations = 0, inferenceBatches = 0;
   let depth = 0, searchingDepth = 0, selectiveDepth = 0, rootActionsSearched = 0;
   let bestAction = null, pv = [], score = null, rootPartial = null;
   let completed = false, status = 'incomplete', stoppedReason = null;
   let mateProven = false;
-  let candidateCaps = 0, beamPruned = 0, lastProgress = started;
+  let candidateCaps = 0, cutoffs = 0, lastProgress = started;
 
   function check(includeNodes = true) {
     if (options.shouldStop?.()) stoppedReason = 'cancelled';
@@ -144,36 +146,46 @@ export async function analyze(position, options = {}) {
     }
     return ranked.sort((a, b) => b.value - a.value || a.index - b.index);
   }
-  async function search(pos, remaining, ply) {
+  async function search(pos, remaining, ply, alpha = -Infinity, beta = Infinity) {
     check(); tick('search');
     selectiveDepth = Math.max(selectiveDepth, ply);
     const generated = candidates(pos, ply);
     if (!generated.items.length) return terminalValue(pos, ply);
     const ranked = await rank(generated.items, ply + 1, sign(pos));
-    // At depth one every generated candidate receives a value. At greater
-    // depths the beam is selected entirely by those model/terminal values.
-    const selected = remaining === 1 ? ranked : ranked.slice(0, beamWidth);
-    if (remaining > 1) beamPruned += ranked.length - selected.length;
+    // Reuse the last iteration's best turn for ordering only. It cannot change
+    // candidate membership or exclude moves with a weak shallow model value.
+    const preferred = preferredActions.get(pos);
+    const preferredIndex = remaining > 1 ? ranked.findIndex(item => item.moves === preferred) : -1;
+    if (preferredIndex > 0) ranked.unshift(...ranked.splice(preferredIndex, 1));
     let best = null;
-    const outcomes = [];
-    for (const candidate of selected) {
+    let searched = 0, allLossesProven = true;
+    for (const candidate of ranked) {
       check(false);
       const child = candidate.terminal || (remaining === 1
         ? { score: -candidate.value, pv: [], mateProven: false }
-        : await search(candidate.position, remaining - 1, ply + 1));
+        : await search(candidate.position, remaining - 1, ply + 1, -beta, -alpha));
       const result = { score: -child.score, pv: [candidate.moves, ...child.pv], mateProven: child.mateProven };
-      outcomes.push(result);
+      searched++;
+      allLossesProven &&= result.score < -MATE_THRESHOLD && result.mateProven;
       if (ply === 0) rootActionsSearched++;
       if (!best || result.score > best.score) {
         best = result;
         if (ply === 0) rootPartial = { ...result, bestAction: candidate.moves };
       }
+      // A negative mate score is provisional until every legal alternative
+      // loses. Do not tighten the window or cut off on it: clamping an
+      // unproved losing mate after a cutoff would corrupt the returned bound.
+      if (result.score >= -MATE_THRESHOLD) {
+        alpha = Math.max(alpha, result.score);
+        if (alpha >= beta && searched < ranked.length) { cutoffs++; break; }
+      }
     }
+    preferredActions.set(pos, best.pv[0]);
     if (Math.abs(best.score) > MATE_THRESHOLD) {
       // A winning mate needs one certified continuation; a losing mate needs
-      // every legal alternative. A capped/beam-pruned tree cannot prove a loss.
+      // every legal alternative. A capped or cut-off tree cannot prove a loss.
       best.mateProven = best.score > 0 ? best.mateProven
-        : generated.exhaustive && selected.length === ranked.length && outcomes.every(item => item.mateProven);
+        : generated.exhaustive && searched === ranked.length && allLossesProven;
       if (!best.mateProven) best.score = Math.sign(best.score) * (MATE_THRESHOLD - 1);
     }
     return best;
@@ -183,16 +195,16 @@ export async function analyze(position, options = {}) {
     const whiteScore = score === null ? null : Math.round(score * rootSign);
     return {
       engine: 'transformer', bestAction, score: whiteScore, depth, nodes, searchNodes, generationNodes,
-      qnodes: 0, ttHits: 0, qTtHits: 0, cutoffs: 0, elapsedMs: Math.round(elapsedMs),
+      qnodes: 0, ttHits: 0, qTtHits: 0, cutoffs, elapsedMs: Math.round(elapsedMs),
       searchingDepth, rootActionsSearched, selectiveDepth,
       nps: elapsedMs ? Math.round(nodes * 1000 / elapsedMs) : 0, pv, status, completed,
       stoppedReason, tableEntries: 0, cacheMemoryBytes: 0,
-      searchPolicy: 'transformer-bounded-beam', candidateLimit, innerCandidateLimit, beamWidth,
-      candidateCaps, beamPruned, candidateCacheEntries: candidateCache.size, evaluations, inferenceBatches, policyLeaves: 0, effectiveQuiescenceDepth: 0,
+      searchPolicy: 'transformer-bounded-alpha-beta', candidateLimit, innerCandidateLimit,
+      candidateCaps, candidateCacheEntries: candidateCache.size, evaluations, inferenceBatches, policyLeaves: 0, effectiveQuiescenceDepth: 0,
       mateProven, terminalProof: ['checkmate', 'stalemate'].includes(status) ? 'unrestricted-legal-exhaustion' : null,
       scoreType: score === null ? 'unavailable' : Math.abs(score) > MATE_THRESHOLD ? 'mate' : 'cp',
       mateIn: score !== null && Math.abs(score) > MATE_THRESHOLD ? Math.sign(whiteScore) * (MATE_SCORE - Math.abs(score)) : null,
-      limits: { timeMs, maxDepth, maxNodes, candidateLimit, innerCandidateLimit, beamWidth, maxCachedPositions, quiescenceDepth: 0 },
+      limits: { timeMs, maxDepth, maxNodes, candidateLimit, innerCandidateLimit, maxCachedPositions, quiescenceDepth: 0 },
     };
   }
   try {

@@ -13,7 +13,7 @@ let autoRevision = null;
 let initialPosition = true;
 let boardSize = Number($('board-size').value);
 const searchSettingsKey = 'vibe-d-ai.search-settings.v1';
-const resourceSettingIds = ['time-budget', 'search-depth', 'node-budget', 'cache-memory'];
+const resourceSettingIds = ['time-budget', 'search-depth', 'node-budget', 'cache-memory', 'search-threads'];
 const searchSettingIds = ['engine-select', ...resourceSettingIds];
 let refreshingEngines = false;
 let engines = {
@@ -44,6 +44,9 @@ function renderEngine() {
   $('cache-memory-help').textContent = neural
     ? 'The transformer uses its own bounded model memory. Search cache (RAM) applies to Classical search only.'
     : 'Cache budget estimates RAM for saved search results; total RAM is higher. This CPU engine does not use GPU VRAM.';
+  $('search-threads-help').textContent = neural
+    ? 'Search threads apply to Classical search only.'
+    : 'Threads search turns in parallel. Time, node, and cache budgets apply to the whole search. More threads may help deeper searches; each thread also uses extra RAM.';
   $('refresh-engines').disabled = refreshingEngines;
   if (!search) $('search-status').textContent = engineIdleStatus();
   updateControls();
@@ -133,7 +136,7 @@ function updateControls() {
   $('variant').disabled = busy;
   $('ai-side').disabled = busy;
   $('engine-select').disabled = busy;
-  for (const id of resourceSettingIds) $(id).disabled = busy || running || (id === 'cache-memory' && selectedEngine() === 'transformer');
+  for (const id of resourceSettingIds) $(id).disabled = busy || running || (['cache-memory', 'search-threads'].includes(id) && selectedEngine() === 'transformer');
 }
 function receiveGame(next) {
   game = next;
@@ -354,7 +357,8 @@ function renderAnalysis() {
   if (search?.engine === 'transformer' && result) {
     const candidateLimit = result.candidateLimit ?? result.limits?.candidateLimit;
     const innerCandidateLimit = result.innerCandidateLimit ?? result.limits?.innerCandidateLimit;
-    const beamWidth = result.beamWidth ?? result.limits?.beamWidth;
+    const alphaBeta = result.searchPolicy === 'transformer-bounded-alpha-beta';
+    const legacyBeamWidth = alphaBeta ? null : result.beamWidth ?? result.limits?.beamWidth;
     const tokenLimit = result.model?.config?.max_tokens;
     let candidateScope = 'candidate turns are capped';
     if (Number.isFinite(candidateLimit)) {
@@ -362,7 +366,7 @@ function renderAnalysis() {
         ? candidateLimit === innerCandidateLimit ? `up to ${candidateLimit} candidate turns per position` : `up to ${candidateLimit} root / ${innerCandidateLimit} reply candidate turns`
         : `up to ${candidateLimit} root candidate turns`;
     }
-    const details = [`Selective transformer search; ${candidateScope}${Number.isFinite(beamWidth) ? `; best ${beamWidth} deepened` : ''}.`];
+    const details = [`${alphaBeta ? 'Transformer alpha-beta search' : 'Selective transformer search'}; ${candidateScope}${Number.isFinite(legacyBeamWidth) ? `; best ${legacyBeamWidth} deepened` : ''}.`];
     if (Number.isFinite(tokenLimit)) details.push(`Model context: ${tokenLimit} tokens.`);
     if (result.contextTruncated) details.push('Historical context was truncated for the model. Full history still determines legality.');
     if (result.frontierTruncated) details.push('The position exceeds model context; some current-board features were omitted.');
@@ -386,6 +390,7 @@ async function startAnalysis(autoPlay = false) {
     engine: selectedEngine(),
     timeMs: Number($('time-budget').value), maxDepth: Number($('search-depth').value),
     maxNodes: Number($('node-budget').value), cacheMemoryMb: selectedEngine() === 'transformer' ? 0 : Number($('cache-memory').value),
+    threads: selectedEngine() === 'transformer' ? 1 : Number($('search-threads').value),
   };
   saveSearchSettings();
   const revision = game.revision;

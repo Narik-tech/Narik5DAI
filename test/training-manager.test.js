@@ -55,7 +55,7 @@ function firstLegal(position) {
   finally { actions.return(); }
   return { engine: 'transformer', bestAction: action, pv: [action], completed: true,
     status: 'ok', score: 125, depth: 1, nodes: 2, searchNodes: 1, generationNodes: 1,
-    stoppedReason: 'depth', searchPolicy: 'transformer-bounded-beam' };
+    stoppedReason: 'depth', searchPolicy: 'transformer-bounded-alpha-beta' };
 }
 
 async function persistedIteration(runDir) {

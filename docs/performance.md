@@ -65,6 +65,69 @@ false terminal certificates. The suite's defended-pawn case requires depth
 one with recapture analysis; the deeper depth-two experiment above is a
 separate diagnostic.
 
+## Parallel CPU search
+
+Classical analysis supports a configurable root-search pool through the app's
+**Search threads** control, CLI `--threads N`, and the asynchronous `analyze`
+export in `src/parallel-search.js`. The synchronous `src/search.js` API remains
+single-threaded. The default is one thread; the pool is opt-in.
+
+Depth-one passes run on the calling search thread. At depth two and beyond,
+the preferred root turn is searched first to establish an alpha-beta bound.
+The other complete-turn branches are distributed lazily between that thread
+and up to `threads - 1` workers, with at most one outstanding job per worker.
+Workers retain private transposition tables and ordering history across jobs
+and iterations within an analysis. Scout searches use their dispatch-time
+bound; an improving probe is re-searched before it can become the best turn.
+
+The time budget includes pool startup. All threads reserve work from one
+atomic node budget, including action generation. Cache bytes and table-entry
+limits are divided across the pool, not multiplied by its size. Total process
+RAM remains higher because every worker has a JavaScript runtime and copied
+position history. Cancellation and root cutoffs stop outstanding work; an
+interrupted iteration keeps the last completed score, PV, and tactical horizon.
+All workers close before the parallel API returns. `threadsUsed` reports
+whether the pool activated; shallow or terminal searches can use only one.
+
+Parallel work changes scheduling, cache reuse, and tied-move ordering. Fixed
+work-budget results need not match a single-thread run. Completed searches
+are checked for matching scores at the same depth and quiescence horizon;
+the regression suite also covers mate distance, multiboard turns, policy
+limits, live accounting, cancellation, and input immutability.
+
+Use the benchmark to measure your machine and positions:
+
+```sh
+node scripts/benchmark-parallel.js --time-ms 3000 --repeat 3
+node scripts/benchmark-parallel.js --mode depth --case standard --depth 5 --time-ms 10000 --repeat 3
+```
+
+It compares 1, 2, and 4 threads at equal requested depths and equal think
+times, validates every returned PV, and includes startup and cleanup in wall
+time. Fixed-depth speedups are reported only when both searches reach the
+requested depth. A speedup in nodes per second alone does not establish
+deeper search, because parallel branches can duplicate work or miss cutoffs.
+
+A local comparison on 2026-09-24 (Node 22.15.1, Intel i5-12600KF) used the standard opening, depth five,
+quiescence depth two, a 10-second ceiling, and three runs per configuration
+with rotating run order. All nine runs completed depth five with score +65
+centipawns and legal PVs. Median wall times, including worker startup and
+cleanup, were:
+
+| Search threads | Median wall time | Speedup over one thread |
+| --- | ---: | ---: |
+| 1 | 8,164 ms | 1.00x |
+| 2 | 7,534 ms | 1.08x |
+| 4 | 8,222 ms | 0.99x |
+
+These are modest gains, not linear scaling. Parallel searches did more work
+because branches used older bounds and separate caches. Shorter
+locked-king and two-timeline checks also included slowdowns, so one thread
+remains the default and two is a useful first comparison on longer searches.
+An equal-time check with three 3-second runs per configuration completed
+depth four at all thread counts, with the same score; higher throughput did
+not reach an extra full depth within that budget.
+
 ## GPU feasibility
 
 A local check found an NVIDIA GeForce RTX 3060 with 12 GiB of VRAM. A CPU

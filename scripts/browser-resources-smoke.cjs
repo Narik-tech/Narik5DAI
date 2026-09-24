@@ -35,13 +35,21 @@ const assert = require('node:assert/strict');
 
     await page.locator('#node-budget').fill('50');
     await page.locator('#cache-memory').selectOption('16');
+    await page.locator('#search-threads').selectOption('2');
     await page.locator('#time-budget').selectOption('60000');
     await page.locator('#search-depth').selectOption('12');
     await page.reload();
     await page.locator('#connection.online').waitFor();
-    for (const [id, expected] of Object.entries({ 'node-budget': '50', 'cache-memory': '16', 'time-budget': '60000', 'search-depth': '12' })) {
+    for (const [id, expected] of Object.entries({ 'node-budget': '50', 'cache-memory': '16', 'search-threads': '2', 'time-budget': '60000', 'search-depth': '12' })) {
       assert.equal(await page.locator(`#${id}`).inputValue(), expected, `${id} must persist on reload.`);
     }
+    await page.locator('#engine-select').selectOption('transformer');
+    await page.waitForFunction(() => document.getElementById('search-threads').disabled);
+    assert.equal(await page.locator('#cache-memory').isDisabled(), true);
+    assert.match(await page.locator('#search-threads-help').textContent(), /Classical search only/);
+    await page.locator('#engine-select').selectOption('classical');
+    await page.waitForFunction(() => !document.getElementById('search-threads').disabled);
+    assert.equal(await page.locator('#search-threads').inputValue(), '2', 'Switching engines preserves classical thread selection.');
 
     async function analyze() {
       const responsePromise = page.waitForResponse(response => response.request().method() === 'POST' && new URL(response.url()).pathname === '/api/analyze');
@@ -50,7 +58,7 @@ const assert = require('node:assert/strict');
       assert.equal(response.status(), 202);
       const { jobId } = await response.json();
       await page.waitForFunction(() => document.getElementById('analyze-label').textContent === 'Stop analysis');
-      assert.equal(await page.evaluate(() => ['time-budget', 'search-depth', 'node-budget', 'cache-memory'].every(id => document.getElementById(id).disabled)), true, 'Resource settings must be disabled while analysis runs.');
+      assert.equal(await page.evaluate(() => ['time-budget', 'search-depth', 'node-budget', 'cache-memory', 'search-threads'].every(id => document.getElementById(id).disabled)), true, 'Resource settings must be disabled while analysis runs.');
       await page.waitForFunction(() => document.getElementById('analyze-label').textContent === 'Analyze position', null, { timeout: 15000 });
       const job = await page.request.get(new URL(`/api/analysis/${jobId}`, page.url()).href).then(response => response.json());
       assert.equal(job.status, 'done');
@@ -58,7 +66,8 @@ const assert = require('node:assert/strict');
     }
 
     const limited = await analyze();
-    assert.deepEqual(requests.at(-1), { engine: 'classical', timeMs: 60000, maxDepth: 12, maxNodes: 50, cacheMemoryMb: 16 });
+    assert.deepEqual(requests.at(-1), { engine: 'classical', timeMs: 60000, maxDepth: 12, maxNodes: 50, cacheMemoryMb: 16, threads: 2 });
+    assert.equal(limited.limits.threads, 2);
     assert.equal(limited.limits.maxNodes, 50);
     assert.equal(limited.limits.cacheMemoryMb, 16);
     assert.equal(limited.stoppedReason, 'nodes');
@@ -71,7 +80,7 @@ const assert = require('node:assert/strict');
     await page.screenshot({ path: 'artifacts/resources-desktop.png', fullPage: true });
     await page.setViewportSize({ width: 390, height: 844 });
     assert.equal(await page.evaluate(() => document.documentElement.scrollWidth > innerWidth), false, 'Page must fit a 390px mobile viewport.');
-    for (const id of ['node-budget', 'cache-memory']) {
+    for (const id of ['node-budget', 'cache-memory', 'search-threads']) {
       const bounds = await page.locator(`#${id}`).boundingBox();
       assert.ok(bounds.x >= 0 && bounds.x + bounds.width <= 390, `${id} must fit mobile width.`);
     }
@@ -101,10 +110,10 @@ const assert = require('node:assert/strict');
     await page.waitForFunction(() => !document.getElementById('submit-button').disabled);
     await page.locator('#submit-button').click();
     await page.locator('#history-count').filter({ hasText: '2 turns' }).waitFor({ timeout: 15000 });
-    assert.deepEqual(requests.at(-1), { engine: 'classical', timeMs: 1000, maxDepth: 2, maxNodes: 700, cacheMemoryMb: 32 }, 'Automatic engine replies must use the chosen resource settings.');
+    assert.deepEqual(requests.at(-1), { engine: 'classical', timeMs: 1000, maxDepth: 2, maxNodes: 700, cacheMemoryMb: 32, threads: 2 }, 'Automatic engine replies must use the chosen resource settings.');
     assert.equal(await page.locator('#turn-label').textContent(), 'White to play');
     assert.deepEqual(errors, []);
-    console.log('Resource browser smoke passed: node validation, persisted settings, submitted limits, disabled controls, node-limit result, retained result budgets, cache off, automatic reply, 390px mobile width.');
+    console.log('Resource browser smoke passed: node validation, persisted settings including threads, submitted limits, controls disabled during analysis/transformer selection, node-limit result, retained result budgets, cache off, automatic reply, 390px mobile width.');
     console.log('Screenshots: artifacts/resources-desktop.png, artifacts/resources-mobile.png');
   } finally {
     if (browser) await browser.close();

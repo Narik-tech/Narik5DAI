@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { analyze, MATE_SCORE } from '../src/transformer-search.js';
-import { createPosition, formatAction, generateActions, positionKey, validateAction } from '../src/rules.js';
+import { createPosition, formatAction, generateActions, inCheck, positionKey, validateAction } from '../src/rules.js';
 
 const limits = { timeMs: 10000, maxNodes: 100000, maxDepth: 1 };
 const zero = async positions => positions.map(() => 0);
@@ -18,6 +18,26 @@ function validatePv(position, result) {
   for (const action of result.pv) current = validateAction(current, action);
   return current;
 }
+function fractionalValue(position) {
+  let hash = 2166136261;
+  for (const char of positionKey(position)) hash = Math.imul(hash ^ char.charCodeAt(0), 16777619);
+  return ((hash >>> 0) % 2001 - 1000) / 1000;
+}
+// Independent exhaustive minimax over the same bounded candidate universe.
+// Fractional values exercise alpha-beta bounds that must not assume integer scores.
+function minimax(position, remaining, candidateLimit, innerCandidateLimit = candidateLimit, ply = 0) {
+  const choices = firstActions(position, ply ? innerCandidateLimit : candidateLimit);
+  const side = position.action % 2 ? -1 : 1;
+  if (!choices.length) return { score: inCheck(position) ? side * (-MATE_SCORE + ply) : 0, actions: [] };
+  if (!remaining) return { score: fractionalValue(position), actions: [] };
+  let best = -Infinity, score, actions = [];
+  for (const candidate of choices) {
+    const value = minimax(candidate.position, remaining - 1, candidateLimit, innerCandidateLimit, ply + 1).score;
+    if (value * side > best) { best = value * side; score = value; actions = [candidate.moves]; }
+    else if (value * side === best) actions.push(candidate.moves);
+  }
+  return { score, actions };
+}
 
 test('neural batch values select different legal actions for White without changing the position', async () => {
   const position = createPosition(), original = structuredClone(position);
@@ -28,7 +48,7 @@ test('neural batch values select different legal actions for White without chang
       evaluateBatch: async positions => { batches.push(positions.length); return positions.map(pos => positionKey(pos) === wanted ? 321 : -100); },
     });
     assert.equal(result.engine, 'transformer');
-    assert.equal(result.searchPolicy, 'transformer-bounded-beam');
+    assert.equal(result.searchPolicy, 'transformer-bounded-alpha-beta');
     assert.equal(result.depth, 1);
     assert.equal(result.score, 321);
     assert.equal(result.completed, true);
@@ -76,19 +96,66 @@ test('turn-zero continuations agree after submitting d4 at the same remaining de
   }
 });
 
-test('iterative beam search respects depth and returns full-turn legal PV', async () => {
+test('ordered alpha-beta respects depth and returns full-turn legal PV', async () => {
   const position = createPosition(), reports = [];
-  const result = await analyze(position, { ...limits, maxDepth: 3, candidateLimit: 4, innerCandidateLimit: 3, beamWidth: 2, maxCachedPositions: 2,
+  const result = await analyze(position, { ...limits, maxDepth: 3, candidateLimit: 4, innerCandidateLimit: 3, maxCachedPositions: 2,
     evaluateBatch: zero, onProgress: report => { if (report.completed) reports.push(report.depth); },
   });
   assert.equal(result.depth, 3);
   assert.equal(result.stoppedReason, 'depth');
   assert.equal(result.pv.length, 3);
-  assert.equal(result.beamWidth, 2);
-  assert(result.beamPruned > 0);
+  assert.equal(result.rootActionsSearched, 4);
+  assert(result.cutoffs > 0);
+  assert.equal('beamWidth' in result, false);
+  assert.equal('beamPruned' in result, false);
+  assert.equal('beamWidth' in result.limits, false);
   assert(result.candidateCacheEntries <= 2);
   assert.deepEqual([...new Set(reports)], [1, 2, 3]);
   validatePv(position, result);
+});
+
+test('a sixth-ranked shallow move remains searchable and wins at depth two', async () => {
+  const position = createPosition(), choices = firstActions(position);
+  const favorite = choices[5], values = new Map();
+  choices.forEach((candidate, index) => {
+    values.set(positionKey(candidate.position), 800 - index * 100);
+    for (const reply of firstActions(candidate.position)) {
+      values.set(positionKey(reply.position), candidate === favorite ? 500 : -1000);
+    }
+  });
+  const evaluateBatch = async positions => positions.map(pos => values.get(positionKey(pos)) ?? 0);
+  const shallow = await analyze(position, { ...limits, candidateLimit: 8, evaluateBatch });
+  assert.deepEqual(shallow.bestAction, choices[0].moves);
+  const result = await analyze(position, { ...limits, maxDepth: 2, candidateLimit: 8, evaluateBatch });
+  assert.equal(result.depth, 2);
+  assert.equal(result.rootActionsSearched, 8);
+  assert.equal(result.score, 500);
+  assert.deepEqual(result.bestAction, favorite.moves);
+  assert.equal(result.pv.length, 2);
+  validatePv(position, result);
+});
+
+test('ordered alpha-beta agrees with fractional minimax for both colors, horizons, and candidate caps', async () => {
+  let cutoffs = 0;
+  for (const position of [createPosition(), createPosition({ pgn: '1. e4' })]) {
+    for (const [candidateLimit, innerCandidateLimit] of [[2, 2], [4, 4], [5, 3]]) {
+      for (const maxDepth of [1, 2, 3]) {
+        const expected = minimax(position, maxDepth, candidateLimit, innerCandidateLimit);
+        const result = await analyze(position, { ...limits, maxDepth, candidateLimit, innerCandidateLimit,
+          evaluateBatch: async positions => positions.map(fractionalValue),
+        });
+        const context = `side=${position.action % 2}, depth=${maxDepth}, caps=${candidateLimit}/${innerCandidateLimit}`;
+        assert.equal(result.depth, maxDepth, context);
+        assert.equal(result.score, Math.round(expected.score), context);
+        assert(expected.actions.some(action => JSON.stringify(action) === JSON.stringify(result.bestAction)), context);
+        assert.equal(result.rootActionsSearched, candidateLimit, context);
+        assert.equal(result.pv.length, maxDepth, context);
+        cutoffs += result.cutoffs;
+        validatePv(position, result);
+      }
+    }
+  }
+  assert(cutoffs > 0, 'oracle comparisons must include actual alpha-beta pruning');
 });
 
 test('multiple active boards are evaluated and played as complete submissions', async () => {
@@ -193,17 +260,43 @@ test('mate proof survives a winning witness but requires every move for a losing
   assert.equal(won.mateIn, 1);
   assert.equal(won.mateProven, true);
   validatePv(winning, won);
+  const cappedWin = await analyze(winning, { ...limits, candidateLimit: 9, evaluateBatch: zero });
+  assert(cappedWin.candidateCaps > 0);
+  assert.equal(cappedWin.mateIn, 1);
+  assert.equal(cappedWin.mateProven, true, 'a certified winning witness survives a candidate cap');
   const losing = createPosition({ pgn: '[Board "Custom"]\n[Size "4x4"]\n[4/k3/QK1q/n3:0:1:w]' });
   const lost = await analyze(losing, { ...limits, maxDepth: 3, evaluateBatch: zero });
   assert.equal(lost.mateIn, -2);
   assert.equal(lost.mateProven, true);
-  for (const cap of [{ candidateLimit: 1 }, { beamWidth: 1 }]) {
-    const selective = await analyze(losing, { ...limits, maxDepth: 3, evaluateBatch: zero, ...cap });
-    assert.equal(selective.mateIn, null);
-    assert.equal(selective.mateProven, false);
-    assert.equal(selective.scoreType, 'cp');
-    validatePv(losing, selective);
-  }
+  const selective = await analyze(losing, { ...limits, maxDepth: 3, evaluateBatch: zero, candidateLimit: 1 });
+  assert.equal(selective.mateIn, null);
+  assert.equal(selective.mateProven, false);
+  assert.equal(selective.scoreType, 'cp');
+  validatePv(losing, selective);
+  const replyCap = await analyze(losing, { ...limits, maxDepth: 3, evaluateBatch: zero, innerCandidateLimit: 1 });
+  assert(replyCap.candidateCaps > 0);
+  assert.equal(replyCap.mateIn, -2);
+  assert.equal(replyCap.mateProven, true, 'each legal root move has a certified opponent winning witness');
+});
+
+test('a mate witness can cause a safe cutoff without claiming that every root move loses', async () => {
+  const position = createPosition({ pgn: '[Board "Custom"]\n[Size "4x4"]\n[4/2q1/4/K2k:0:1:w]' });
+  const safe = firstActions(position).find(candidate => formatAction(position, candidate.moves) === '(0T1)Ka2');
+  const safeKey = positionKey(safe.position);
+  // Search the safe move first. Black's mating reply to Kb1 then proves that
+  // root alternative cannot improve the bound, without exhausting its replies.
+  const result = await analyze(position, { ...limits, maxDepth: 2,
+    evaluateBatch: async positions => positions.map(pos => positionKey(pos) === safeKey ? 100 : 0),
+  });
+  assert.equal(result.depth, 2);
+  assert(result.cutoffs > 0);
+  assert.equal(result.candidateCaps, 0);
+  assert.deepEqual(result.bestAction, safe.moves);
+  assert.equal(result.score, 0);
+  assert.equal(result.mateIn, null);
+  assert.equal(result.mateProven, false);
+  assert.equal(result.scoreType, 'cp');
+  validatePv(position, result);
 });
 
 test('neural values cannot masquerade as mate scores', async () => {
