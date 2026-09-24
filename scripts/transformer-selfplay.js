@@ -27,6 +27,8 @@ const defaults = {
   arenaSuite: path.join(PROJECT_ROOT, 'examples/matches/validation.json'),
 };
 
+export const getSelfPlayDefaults = () => ({ ...defaults });
+
 export const help = `Usage: node scripts/transformer-selfplay.js [options]
 Continuous shortcut: npm run transformer:selfplay:continuous
   --iterations N       Cycles this invocation; 0 = until Ctrl+C (default 1)
@@ -60,8 +62,8 @@ Existing trained checkpoint required. Only complete pairs score; invalid games o
 insufficient completed pairs block promotion. Ctrl+C closes owned processes; rerun to continue
 with persisted replay and the active model. Incomplete cycles are not promoted.`;
 
-export function parseArguments(args) {
-  const options = { ...defaults };
+export function parseArguments(args, initialOptions = defaults) {
+  const options = { ...initialOptions };
   const names = { iterations: 'iterations', games: 'games', plies: 'maxPlies', nodes: 'maxNodes', depth: 'maxDepth',
     'time-ms': 'timeMs', 'terminal-work': 'terminalWork', exploration: 'exploration', 'exploration-plies': 'explorationPlies',
     'outcome-weight': 'outcomeWeight', steps: 'steps', 'batch-size': 'batchSize', 'learning-rate': 'learningRate',
@@ -148,7 +150,7 @@ export function workerAnalyzer(runtime, shouldStop = () => false) {
   };
 }
 
-async function trainCandidate(options, files, seed, shouldStop) {
+async function trainCandidate(options, files, seed, shouldStop, onEvent = emit) {
   checkStop(shouldStop);
   const args = ['-u', path.join(PROJECT_ROOT, 'neural/train.py'), '--data', files.replay,
     '--resume', files.incumbent, '--output', files.candidate, '--steps', String(options.steps),
@@ -163,7 +165,7 @@ async function trainCandidate(options, files, seed, shouldStop) {
   child.stdout.on('data', chunk => { log.write(chunk); tail = (tail + chunk.toString()).slice(-6000); });
   child.stderr.on('data', chunk => { log.write(chunk); tail = (tail + chunk.toString()).slice(-6000); });
   const poll = setInterval(() => { if (shouldStop()) child.kill(); }, 100);
-  const heartbeat = setInterval(() => emit('training-progress', { log: files.log }), 30000);
+  const heartbeat = setInterval(() => onEvent('training-progress', { log: files.log }), 30000);
   try {
     await new Promise((resolve, reject) => {
       log.once('error', error => { child.kill(); reject(error); });
@@ -200,7 +202,7 @@ async function pruneIterations(runDir, runId, keep) {
   }
 }
 
-export async function runSelfPlay(options, { shouldStop = () => false, onRuntime = () => {} } = {}) {
+export async function runSelfPlay(options, { shouldStop = () => false, onRuntime = () => {}, onEvent = emit } = {}) {
   options = { ...options };
   await mkdir(options.runDir, { recursive: true });
   // Resolve existing symlinks before output validation and checkpoint locking.
@@ -249,12 +251,15 @@ export async function runSelfPlay(options, { shouldStop = () => false, onRuntime
         await atomicWrite(path.join(options.runDir, 'latest.json'), json(report));
       };
       try {
+        await saveReport();
+        onEvent('iteration-start', { iteration, startedAt: manifest.startedAt });
+        checkStop(shouldStop);
         const snapshot = await readFile(options.checkpoint);
         const incumbentHash = createHash('sha256').update(snapshot).digest('hex');
         await atomicWrite(files.incumbent, snapshot);
         const runtime = openRuntime(files.incumbent);
         const info = await runtime.start();
-        emit('selfplay-start', { iteration, folder, seed, device: info.device, trainedSteps: info.model.trainedSteps });
+        onEvent('selfplay-start', { iteration, folder, seed, device: info.device, trainedSteps: info.model.trainedSteps });
         let gameIndex = 0;
         const play = await generateSelfPlayGames({ ...options, positions: trainingSuite.cases, seed,
           analyzePosition: workerAnalyzer(runtime, shouldStop), shouldStop,
@@ -263,7 +268,7 @@ export async function runSelfPlay(options, { shouldStop = () => false, onRuntime
             const number = String(++gameIndex).padStart(3, '0');
             await atomicWrite(path.join(folder, `selfplay-${number}.json`), json(game));
             await atomicWrite(path.join(folder, `samples-${number}.jsonl`), samples.map(row => JSON.stringify(row)).join('\n') + (samples.length ? '\n' : ''));
-            emit('selfplay-game', { iteration, game: gameIndex, result: game.result, reason: game.reason, samples: samples.length });
+            onEvent('selfplay-game', { iteration, game: gameIndex, result: game.result, reason: game.reason, samples: samples.length });
           } });
         report.selfplay = play.summary; report.incumbentSha256 = incumbentHash;
         closeRuntimes(); checkStop(shouldStop);
@@ -271,14 +276,14 @@ export async function runSelfPlay(options, { shouldStop = () => false, onRuntime
         if (!play.samples.length) throw new Error('No completed finite search targets. Increase --nodes/--time-ms or change --suite.');
         report.replay = await updateReplay({ replayPath: replay, newSamples: play.samples, seedData: options.seedData,
           maxSamples: options.replaySize, seed, excludePositionKeys: arenaKeys });
-        emit('training-start', { iteration, replay: report.replay, steps: options.steps, batchSize: options.batchSize });
+        onEvent('training-start', { iteration, replay: report.replay, steps: options.steps, batchSize: options.batchSize });
         await saveReport();
-        await trainCandidate(options, files, seed, shouldStop);
+        await trainCandidate(options, files, seed, shouldStop, onEvent);
         checkStop(shouldStop);
         const candidate = openRuntime(files.candidate), incumbent = openRuntime(files.incumbent);
         const candidateInfo = await candidate.start(); await incumbent.start();
         report.candidate = candidateInfo.model; report.candidateSha256 = await fileHash(files.candidate);
-        emit('arena-start', { iteration, pairs: options.arenaPairs, trainedSteps: candidateInfo.model.trainedSteps });
+        onEvent('arena-start', { iteration, pairs: options.arenaPairs, trainedSteps: candidateInfo.model.trainedSteps });
         let arenaIndex = 0;
         const arena = await evaluateCandidate({ candidate: workerAnalyzer(candidate, shouldStop), incumbent: workerAnalyzer(incumbent, shouldStop),
           suite: arenaSuite, pairs: options.arenaPairs, seed, maxPlies: options.arenaPlies, maxNodes: options.maxNodes,
@@ -286,7 +291,7 @@ export async function runSelfPlay(options, { shouldStop = () => false, onRuntime
           minPairs: options.minPairs, promotionScore: options.promotionScore, shouldStop,
           onGame: async game => {
             await atomicWrite(path.join(folder, `arena-${String(++arenaIndex).padStart(3, '0')}.json`), json(game));
-            emit('arena-game', { iteration, game: arenaIndex, result: game.result, reason: game.reason });
+            onEvent('arena-game', { iteration, game: arenaIndex, result: game.result, reason: game.reason });
           } });
         closeRuntimes(); checkStop(shouldStop);
         await atomicWrite(path.join(folder, 'arena.json'), json(arena));
@@ -302,7 +307,7 @@ export async function runSelfPlay(options, { shouldStop = () => false, onRuntime
         }
         report.status = 'complete'; report.finishedAt = new Date().toISOString();
         await saveReport();
-        emit('cycle-complete', { iteration, promoted: report.promoted, decision: arena.decision, report: path.join(folder, 'report.json') });
+        onEvent('cycle-complete', { iteration, promoted: report.promoted, decision: arena.decision, report: path.join(folder, 'report.json') });
         reports.push({ iteration, promoted: report.promoted, folder });
         // Keep continuous operation's memory bounded as well as replay and disk retention.
         if (reports.length > options.keepIterations) reports.shift();

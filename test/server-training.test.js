@@ -1,0 +1,187 @@
+import test from 'node:test';
+import assert from 'node:assert/strict';
+import { EventEmitter } from 'node:events';
+import { execFile } from 'node:child_process';
+import { promisify } from 'node:util';
+import { mkdtemp, mkdir, rm, writeFile } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import path from 'node:path';
+import { createApp } from '../src/server.js';
+import { TrainingManager } from '../src/training-manager.js';
+import { createPosition, formatAction, generateActions, positionKey, validateAction } from '../src/rules.js';
+
+test('invalid training environment leaves classical gameplay available and reports a training setup error', async () => {
+  const script = `
+    import assert from 'node:assert/strict';
+    const { createApp } = await import(${JSON.stringify(new URL('../src/server.js', import.meta.url).href)});
+    const app = createApp();
+    await new Promise(resolve => app.listen(0, '127.0.0.1', resolve));
+    const base = 'http://127.0.0.1:' + app.address().port;
+    try {
+      assert.equal((await fetch(base + '/api/game')).status, 200);
+      const response = await fetch(base + '/api/training');
+      assert.equal(response.status, 200);
+      const data = await response.json();
+      assert.equal(data.availability.available, false);
+      assert.match(data.availability.reason, /Invalid training configuration/);
+    } finally { await new Promise(resolve => app.close(resolve)); }
+  `;
+  for (const environment of [
+    { TRANSFORMER_DEVICE: 'invalid-device' },
+    { TRANSFORMER_DEVICE: 'auto', TRANSFORMER_CHECKPOINT: path.resolve('artifacts/transformer/selfplay/replay.jsonl') },
+  ]) {
+    await promisify(execFile)(process.execPath, ['--input-type=module', '-e', script], {
+      env: { ...process.env, ...environment }, windowsHide: true,
+    });
+  }
+});
+
+async function fixture(t) {
+  const directory = await mkdtemp(path.join(tmpdir(), 'vibe-server-training-'));
+  const runDir = path.join(directory, 'selfplay');
+  await mkdir(runDir);
+  const workers = [], invocations = [];
+  const manager = new TrainingManager({
+    runDir, checkpoint: path.join(directory, 'model.pt'), python: path.join(directory, 'python'),
+    availability: async () => ({ available: true }),
+    workerFactory: invocation => {
+      const worker = new EventEmitter();
+      worker.postMessage = message => {
+        if (message.type === 'stop') queueMicrotask(() => {
+          worker.emit('message', { type: 'complete', state: 'interrupted' });
+          worker.emit('exit', 0);
+        });
+      };
+      worker.terminate = async () => { worker.emit('exit', 1); return 1; };
+      invocations.push(invocation);
+      workers.push(worker);
+      return worker;
+    },
+  });
+  const server = createApp({ trainingManager: manager });
+  await new Promise(resolve => server.listen(0, '127.0.0.1', resolve));
+  t.after(async () => {
+    await new Promise(resolve => server.close(resolve));
+    await manager.close();
+    await rm(directory, { recursive: true, force: true });
+  });
+  const base = `http://127.0.0.1:${server.address().port}`;
+  const request = async (route, body) => {
+    const response = await fetch(base + route, body === undefined ? {} : {
+      method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body),
+    });
+    return { status: response.status, data: await response.json() };
+  };
+  return { server, manager, runDir, request, base, workers, invocations };
+}
+
+async function writeGame(runDir) {
+  const id = 'iteration-00000003', folder = path.join(runDir, id);
+  await mkdir(folder);
+  const initialPosition = createPosition();
+  const actions = generateActions(initialPosition);
+  let action;
+  try { action = actions.next().value.moves; }
+  finally { actions.return(); }
+  const finalPosition = validateAction(initialPosition, action);
+  const game = {
+    gameId: 'fixture:3:1', startId: 'standard', initialPosition, finalPosition,
+    initialKey: positionKey(initialPosition), finalKey: positionKey(finalPosition),
+    result: 'UNFINISHED', valid: true, reason: 'ply-limit', plies: 1, samples: 1,
+    moves: [{ ply: 0, color: 0, action, notation: formatAction(initialPosition, action),
+      beforeKey: positionKey(initialPosition), afterKey: positionKey(finalPosition),
+      search: { score: 125, completed: true } }],
+  };
+  await writeFile(path.join(folder, 'report.json'), JSON.stringify({ iteration: 3, status: 'complete', promoted: false }));
+  await writeFile(path.join(folder, 'selfplay-001.json'), JSON.stringify(game));
+  return { id, game };
+}
+
+test('training HTTP flow applies editable parameters, reports progress and accepts graceful stop', async t => {
+  const { request, workers, invocations } = await fixture(t);
+  const initial = await request('/api/training');
+  assert.equal(initial.status, 200);
+  assert.equal(initial.data.availability.available, true);
+  assert.equal(initial.data.defaults.iterations, 1);
+  assert.deepEqual(initial.data.iterations, []);
+  const started = await request('/api/training/start', { options: {
+    iterations: 2, games: 3, steps: 17, batchSize: 4, learningRate: 0.002, device: 'cpu',
+  } });
+  assert.equal(started.status, 202, started.data.error);
+  assert.equal(invocations.length, 1);
+  assert.equal(invocations[0].options.steps, 17);
+  assert.equal(invocations[0].options.learningRate, 0.002);
+  assert.equal((await request('/api/training/start', { options: {} })).status, 409);
+  workers[0].emit('message', { type: 'event', event: { event: 'training-start', iteration: 2, steps: 17 } });
+  const running = (await request('/api/training')).data;
+  assert.equal(running.status.iteration, 2);
+  assert.ok(running.status.events.some(event => event.event === 'training-start'));
+  const stopped = await request('/api/training/stop', {});
+  assert.equal(stopped.status, 200);
+  assert.equal(Atomics.load(new Int32Array(invocations[0].cancelBuffer), 0), 1);
+  assert.equal((await request('/api/training')).data.status.state, 'interrupted');
+});
+
+test('training HTTP validation rejects untrusted options and foreign origins before launching a worker', async t => {
+  const { request, base, workers } = await fixture(t);
+  for (const options of [
+    { python: 'cmd.exe' }, { checkpoint: '../outside.pt' }, { runDir: '../outside' },
+    { games: true }, { games: '2' }, { games: 0 }, { learningRate: 0 },
+    { arenaPairs: 1, minPairs: 2 }, { unknown: 3 },
+  ]) {
+    const response = await request('/api/training/start', { options });
+    assert.equal(response.status, 400, `Accepted ${JSON.stringify(options)}`);
+    assert.ok(response.data.error);
+  }
+  const denied = await fetch(base + '/api/training/start', {
+    method: 'POST', headers: { 'Content-Type': 'application/json', Origin: 'https://example.com' },
+    body: JSON.stringify({ options: {} }),
+  });
+  assert.equal(denied.status, 403);
+  assert.equal(workers.length, 0);
+});
+
+test('saved game browsing returns legal replay positions without touching the analysis game', async t => {
+  const { request, runDir, workers } = await fixture(t);
+  const { id, game } = await writeGame(runDir);
+  const initial = (await request('/api/game')).data;
+  const move = initial.moves[0];
+  const pending = (await request('/api/move', { revision: initial.revision, move: move.raw })).data;
+  assert.equal(pending.pending.length, 1);
+  const list = await request('/api/training');
+  assert.equal(list.data.iterations[0].id, id);
+  const detail = await request(`/api/training/iterations/${id}`);
+  assert.equal(detail.status, 200);
+  assert.equal(detail.data.games.length, 1);
+  for (const ply of [0, 1, 0]) {
+    const replay = await request(`/api/training/iterations/${id}/games/selfplay-001?ply=${ply}`);
+    assert.equal(replay.status, 200, replay.data.error);
+    assert.equal(replay.data.ply, ply);
+    assert.equal(positionKey(replay.data.position), positionKey(ply ? game.finalPosition : game.initialPosition));
+  }
+  const unchanged = (await request('/api/game')).data;
+  assert.equal(unchanged.revision, pending.revision);
+  assert.deepEqual(unchanged.position, pending.position);
+  assert.deepEqual(unchanged.pending, pending.pending);
+  assert.equal(unchanged.pgn, pending.pgn);
+  assert.equal(workers.length, 0);
+});
+
+test('training HTTP routes return errors for missing artifacts and invalid replay paths or plies', async t => {
+  const { request, runDir } = await fixture(t);
+  const { id } = await writeGame(runDir);
+  assert.equal((await request('/api/training/iterations/iteration-00000099')).status, 404);
+  assert.equal((await request(`/api/training/iterations/${id}/games/selfplay-999`)).status, 404);
+  for (const route of [
+    '/api/training/iterations/..%5Coutside',
+    `/api/training/iterations/${id}/games/..%5Creport`,
+    `/api/training/iterations/${id}/games/report`,
+    `/api/training/iterations/${id}/games/selfplay-001?ply=-1`,
+    `/api/training/iterations/${id}/games/selfplay-001?ply=1.5`,
+    `/api/training/iterations/${id}/games/selfplay-001?ply=two`,
+    `/api/training/iterations/${id}/games/selfplay-001?ply=2`,
+  ]) {
+    const response = await request(route);
+    assert.ok([400, 404].includes(response.status), `Accepted ${route}`);
+  }
+});

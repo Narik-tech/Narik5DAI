@@ -1,0 +1,78 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="theme-color" content="#0b1019" />
+    <title>Training · Vibe-D AI</title>
+    <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'%3E%3Crect width='64' height='64' rx='16' fill='%230b1019'/%3E%3Cpath d='M16 17l16 30 16-30' stroke='%2395f0d5' stroke-width='7' fill='none'/%3E%3C/svg%3E" />
+    <link rel="stylesheet" href="/styles.css" />
+    <link rel="stylesheet" href="/training.css" />
+    <script type="module" src="/training.js"></script>
+  </head>
+  <body class="training-page">
+    <header class="topbar">
+      <a class="brand" href="/" aria-label="Vibe-D AI home"><span class="brand-mark" aria-hidden="true">V<span>↗</span></span><span>Vibe-D AI <span class="brand-meta">5D CHESS</span></span></a>
+      <div class="topbar-right"><nav class="workspace-nav" aria-label="Workspace"><a href="/">Analysis</a><a href="/training" aria-current="page">Training</a></nav><span class="connection" id="training-connection"><span class="status-dot"></span>Connecting</span></div>
+    </header>
+    <main class="training-workspace">
+      <div class="training-heading"><div><p class="eyebrow">LEARN · EVALUATE · EVOLVE</p><h1>Training workspace</h1><p class="subtitle">Run self-play cycles. Inspect the games. Shape the next model.</p></div><span class="experimental-label">EXPERIMENTAL TRANSFORMER</span></div>
+      <div class="training-layout">
+        <aside class="parameter-rail" aria-label="Training configuration">
+          <form id="training-form" class="panel parameter-panel" novalidate>
+            <div class="panel-heading"><h2>Run configuration</h2><button class="text-button" type="button" id="reset-parameters" disabled>Reset</button></div>
+            <p class="section-description">Parameters apply to the next run.</p>
+            <fieldset id="parameter-fields" disabled><legend class="sr-only">Training parameters</legend><div id="parameter-groups"></div></fieldset>
+            <p class="form-error" id="parameter-error" role="alert" hidden></p>
+            <div class="run-actions"><button class="button primary" type="submit" id="start-training" disabled><span aria-hidden="true">▷</span> Start training</button><button class="button quiet stop-button" type="button" id="stop-training" disabled>Stop run</button></div>
+            <p class="run-hint" id="run-hint">Checking local training availability…</p>
+            <p class="parameter-note">Each cycle generates games, trains a candidate, then tests it against the current model. Passing the arena gate promotes the candidate automatically.</p>
+          </form>
+          <div class="local-note"><i class="legend-dot current"></i><p>Runs locally with your existing checkpoint. Completed games and replay samples are retained when you stop.</p></div>
+        </aside>
+        <div class="training-content">
+          <section class="panel run-panel" aria-labelledby="run-heading">
+            <div class="panel-heading"><div class="heading-with-dot"><i class="engine-dot" id="run-dot"></i><h2 id="run-heading">Run monitor</h2></div><div class="monitor-heading-actions"><span class="small-badge" id="run-state">CONNECTING</span><button class="text-button" id="refresh-training" type="button">Refresh</button></div></div>
+            <div class="run-summary"><div><h3 id="run-title">Connecting to training</h3><p id="run-detail">Reading local runs and retained games…</p></div><div class="run-counter"><span class="eyebrow">ITERATION</span><strong id="current-iteration">—</strong></div></div>
+            <ol class="pipeline" aria-label="Training cycle"><li data-phase="selfplay"><span>01</span><div><strong>Self-play</strong><small>Generate experience</small></div></li><li data-phase="training"><span>02</span><div><strong>Train</strong><small>Update candidate</small></div></li><li data-phase="arena"><span>03</span><div><strong>Arena</strong><small>Evaluate both colors</small></div></li><li data-phase="complete"><span>04</span><div><strong>Promotion</strong><small>Apply the score gate</small></div></li></ol>
+            <p class="notice error-notice" id="run-error" role="alert" hidden></p>
+            <details class="event-details"><summary>Live events <span id="event-count">0 events</span></summary><pre id="event-log" class="log-output">No events for this server session.</pre></details>
+          </section>
+          <section class="panel iteration-panel" aria-labelledby="iteration-heading">
+            <div class="panel-heading"><div><p class="eyebrow">RETAINED HISTORY</p><h2 id="iteration-heading">Iteration results</h2></div><label class="iteration-choice"><span class="sr-only">Retained iteration</span><select id="iteration-select" disabled><option>No retained iterations</option></select></label></div>
+            <div id="iteration-empty" class="empty-state"><span class="empty-symbol" aria-hidden="true">↗</span><p>No iterations yet</p><small>Start a run to collect games, training metrics, and arena results.</small></div>
+            <div id="iteration-results" hidden>
+              <div class="iteration-meta"><span id="iteration-description"></span><button class="text-button" id="reuse-parameters" type="button">Use these parameters</button></div>
+              <div class="metric-grid" id="iteration-metrics"></div>
+              <div class="promotion-notice" id="promotion-notice"></div>
+              <details class="iteration-details"><summary>Outcomes &amp; training log</summary><div id="outcome-details" class="outcome-details"></div><pre id="training-log" class="log-output">No training log saved for this iteration.</pre></details>
+            </div>
+          </section>
+          <section class="panel review-panel" aria-labelledby="review-heading">
+            <div class="panel-heading review-heading"><div><p class="eyebrow">UNDERSTAND THE EXPERIENCE</p><h2 id="review-heading">Game review</h2></div><span class="small-badge">READ ONLY</span></div>
+            <div class="review-layout">
+              <aside class="game-library" aria-label="Saved games">
+                <div class="game-filters"><label><span class="sr-only">Filter game type</span><select id="game-kind"><option value="all">All games</option><option value="selfplay">Self-play</option><option value="arena">Arena</option></select></label><label><span class="sr-only">Filter game outcome</span><select id="game-outcome"><option value="all">All outcomes</option><option value="finished">Finished</option><option value="unfinished">Unfinished</option><option value="invalid">Invalid</option></select></label></div>
+                <label class="game-search"><span class="sr-only">Search games</span><input type="search" id="game-search" placeholder="Find a starting position…" /></label>
+                <p class="game-count" id="game-count">0 games</p><div class="game-list" id="game-list"><p class="library-empty">Choose an iteration to explore its games.</p></div>
+              </aside>
+              <div class="game-review" id="game-review" tabindex="-1">
+                <div class="review-empty" id="review-empty"><span aria-hidden="true">♞</span><h3>Your next insight starts with a game.</h3><p>Choose a saved game to step through its timelines and inspect each turn’s search.</p></div>
+                <p class="notice error-notice" id="review-error" role="alert" hidden></p>
+                <div id="review-content" hidden>
+                  <div class="review-game-heading"><div><h3 id="review-game-title"></h3><p id="review-game-detail"></p></div><span class="result-badge" id="review-game-result"></span></div>
+                  <div class="review-toolbar"><span id="review-position-label">Initial position</span><div class="view-options"><label class="compact-label">View <select id="review-orientation"><option value="white">White</option><option value="black">Black</option></select></label><label class="zoom-label"><span aria-hidden="true">−</span><input id="review-board-size" type="range" min="20" max="44" value="30" aria-label="Review board square size" /><span aria-hidden="true">+</span></label><label class="toggle-label"><input type="checkbox" id="review-history" /> History</label></div></div>
+                  <div id="review-viewport" class="multiverse-viewport review-viewport" tabindex="0" aria-label="Recorded multiverse boards; use left and right arrow keys to step through turns"><div id="review-grid" class="timeline-grid"></div></div>
+                  <div class="playback-controls"><div class="playback-buttons"><button class="button quiet" id="first-ply" type="button" aria-label="Initial position" title="Initial position">|‹</button><button class="button quiet" id="previous-ply" type="button" aria-label="Previous turn" title="Previous turn (left arrow)">‹</button><button class="button quiet" id="next-ply" type="button" aria-label="Next turn" title="Next turn (right arrow)">›</button><button class="button quiet" id="last-ply" type="button" aria-label="Final position" title="Final position">›|</button></div><label class="ply-slider"><span class="sr-only">Recorded turn</span><input id="review-ply" type="range" min="0" max="0" value="0" /></label><output id="ply-label" for="review-ply" aria-live="polite">0 / 0</output></div>
+                  <div class="turn-inspector"><div class="turn-list-panel"><p class="eyebrow">RECORDED TURNS</p><ol id="review-moves" class="review-moves"></ol></div><div class="search-inspector"><div class="panel-heading"><p class="eyebrow">SELECTED TURN · SEARCH</p><span id="exploration-badge" class="small-badge" hidden>EXPLORATION</span></div><div class="turn-search-metrics" id="turn-search-metrics"></div><p id="turn-search-note"></p><details id="raw-search-details"><summary>Search &amp; exploration details</summary><pre class="log-output" id="raw-search"></pre></details></div></div>
+                </div>
+              </div>
+            </div>
+          </section>
+          <p class="training-footnote">Unfinished games are not draws. Only valid, completed arena pairs contribute to promotion scores.</p>
+        </div>
+      </div>
+    </main>
+    <div class="toast" id="training-toast" role="status" aria-live="polite" hidden></div>
+  </body>
+</html>

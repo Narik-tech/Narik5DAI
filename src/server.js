@@ -5,12 +5,17 @@ import { Worker } from 'node:worker_threads';
 import { randomUUID } from 'node:crypto';
 import { GameSession } from './session.js';
 import { TransformerRuntime, listEngines, forwardInference } from './transformer-runtime.js';
+import { TrainingManager } from './training-manager.js';
 
 const PUBLIC = new URL('../public/', import.meta.url);
 const staticFiles = new Map([
   ['/', ['index.html', 'text/html; charset=utf-8']],
   ['/app.js', ['app.js', 'text/javascript; charset=utf-8']],
   ['/styles.css', ['styles.css', 'text/css; charset=utf-8']],
+  ['/training', ['training.html', 'text/html; charset=utf-8']],
+  ['/training.html', ['training.html', 'text/html; charset=utf-8']],
+  ['/training.js', ['training.js', 'text/javascript; charset=utf-8']],
+  ['/training.css', ['training.css', 'text/css; charset=utf-8']],
 ]);
 
 function numericOption(value, fallback, min, max, name) {
@@ -38,7 +43,7 @@ async function readBody(req) {
   return value;
 }
 
-export function createApp({ transformerRuntime = new TransformerRuntime() } = {}) {
+export function createApp({ transformerRuntime = new TransformerRuntime(), trainingManager = new TrainingManager() } = {}) {
   const game = new GameSession();
   const jobs = new Map();
   let shuttingDown = false;
@@ -77,6 +82,13 @@ export function createApp({ transformerRuntime = new TransformerRuntime() } = {}
       }
       if (req.method === 'GET' && url.pathname === '/api/game') return send(res, 200, game.snapshot());
       if (req.method === 'GET' && url.pathname === '/api/engines') return send(res, 200, listEngines(transformerRuntime));
+      if (req.method === 'GET' && url.pathname === '/api/training') return send(res, 200, await trainingManager.snapshot());
+      const trainingGame = /^\/api\/training\/iterations\/([^/]+)\/games\/([^/]+)$/.exec(url.pathname);
+      if (req.method === 'GET' && trainingGame) {
+        return send(res, 200, await trainingManager.getGame(trainingGame[1], trainingGame[2], url.searchParams.get('ply') ?? 0));
+      }
+      const trainingIteration = /^\/api\/training\/iterations\/([^/]+)$/.exec(url.pathname);
+      if (req.method === 'GET' && trainingIteration) return send(res, 200, await trainingManager.getIteration(trainingIteration[1]));
       const jobMatch = /^\/api\/analysis\/([a-zA-Z0-9-]+)(\/stop)?$/.exec(url.pathname);
       if (jobMatch) {
         const job = jobs.get(jobMatch[1]);
@@ -91,6 +103,12 @@ export function createApp({ transformerRuntime = new TransformerRuntime() } = {}
       if (req.method !== 'POST') return send(res, 404, { error: 'Not found.' });
       const body = await readBody(req);
       switch (url.pathname) {
+        case '/api/training/start':
+          if (Object.keys(body).some(key => key !== 'options')) throw new Error('Only training options may be supplied.');
+          return send(res, 202, await trainingManager.start(body.options));
+        case '/api/training/stop':
+          if (Object.keys(body).length) throw new Error('Stopping training does not accept options.');
+          return send(res, 200, await trainingManager.stop());
         case '/api/new':
           if (body.variant !== undefined && !game.chess.variants.some(v => v.shortName === body.variant && v.shortName !== 'custom')) {
             throw new Error('Unknown board variant.');
@@ -201,6 +219,7 @@ export function createApp({ transformerRuntime = new TransformerRuntime() } = {}
       void job.worker.terminate();
     }
     transformerRuntime.close();
+    void trainingManager.close();
   };
   // `close` waits for active HTTP requests. Reject pending model startup first,
   // so an analysis awaiting startup cannot keep server shutdown open for a minute.

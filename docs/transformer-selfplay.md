@@ -8,6 +8,37 @@ existing `npm run selfplay` diagnostic are separate.
 
 ## Run it
 
+### Browser controls and game review
+
+Start the local server with `npm start` and open **Training** in the app header
+at `http://127.0.0.1:5173/training`. The page uses the same runner and saved
+history as the commands below. An existing trained checkpoint and the local
+transformer Python environment are required to start training; saved games can
+be reviewed without starting a model.
+
+Adjust the parameters before starting a run. Settings cover cycle count
+(`0` means continuous), self-play games and turn limits, search budgets,
+training updates, batch size, learning rate, replay capacity, exploration,
+device, and the paired promotion gate. Changes apply to the next run.
+Browser preferences are saved locally; each cycle also records its exact
+settings in `iteration.json` and `report.json`.
+
+The run view shows its current phase, retained cycle reports, promotion
+decisions, and training log. **Stop run** cooperatively stops a run started by
+this server and preserves completed records and replay. Closing a browser tab
+does not stop training; stopping the server requests cancellation. An external
+command-line runner is detected through its lock and must be stopped from its
+own terminal.
+
+Select a retained cycle and then a self-play or arena game. Step through
+complete player turns to inspect the boards and move trace. Review does not
+change the live analysis game. Search scores are from White's perspective;
+unfinished games remain unfinished. History includes cycles created from the
+command line in the default run directory. Retention still follows
+`keepIterations`, so older cycles and their games disappear when pruned.
+
+### Command line
+
 Run from the project directory in PowerShell. This workstation already has the
 CUDA environment and a trained checkpoint. For a fresh installation, first run
 `npm run transformer:setup`, `npm run transformer:data`, and
@@ -232,6 +263,13 @@ exploration and full-rules terminal verification use cooperative work/time caps.
 `node --test` covers game legality, outcomes for both colors, target blending,
 unfinished games, exploration, invalid-result rejection, cancellation, replay
 deduplication/mixing, atomic checkpoint replacement, locks, and the paired gate.
+Training UI tests also cover parameter validation, concurrent starts, cooperative
+stop and shutdown, external runner locks, history browsing, and read-only legal
+replay. These tests use temporary artifacts and fake workers. The optional
+`node scripts/browser-training-smoke.cjs` checks the browser controls and mobile
+layout with isolated fixtures; it requires Playwright (or `PLAYWRIGHT_MODULE`)
+and an installed browser (`CHROME_PATH` can select one).
+
 The implementation was also exercised on this machine's CUDA GPU through actual
 self-play, candidate training, rejection of unfinished/tied arenas, and a resumed
 run using persisted replay. Four short CUDA cycles completed, plus a deliberate
