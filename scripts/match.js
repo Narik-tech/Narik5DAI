@@ -50,13 +50,15 @@ function recordSearch(result) {
 }
 
 /** Missing moves are unfinished games; legal budget fallbacks can still play. */
-export async function runGame({ position, engineA = analyze, engineB = analyze, aColor = 0, ...options }) {
+export async function runGame({ position, engineA = analyze, engineB = analyze, aColor = 0, playOnTimeLimit = false, ...options }) {
   const limits = limitsFor(options);
   if (![0, 1].includes(aColor)) throw new Error('aColor must be 0 (White) or 1 (Black).');
+  if (typeof playOnTimeLimit !== 'boolean') throw new Error('playOnTimeLimit must be a boolean.');
   let current = structuredClone(position);
   const game = { aColor, white: aColor === 0 ? 'A' : 'B', black: aColor === 1 ? 'A' : 'B',
     result: 'UNFINISHED', winner: null, winnerColor: null, valid: true,
-    reason: null, initialPosition: structuredClone(position), initialKey: positionKey(position), limits, moves: [] };
+    reason: null, initialPosition: structuredClone(position), initialKey: positionKey(position), limits,
+    playOnTimeLimit, moves: [] };
   const finish = (reason, extra = {}) => Object.assign(game, { reason, plies: game.moves.length,
     finalPosition: structuredClone(current), finalKey: positionKey(current), ...extra });
   const finishTerminal = (certificate, extra = {}) => {
@@ -115,7 +117,9 @@ export async function runGame({ position, engineA = analyze, engineB = analyze, 
       }
       if (certificate.terminal) return finishTerminal(certificate, { lastSearch: search });
     }
-    if (result.stoppedReason === 'time') return stop('time-limit');
+    // Fixed-work benchmarks stop on a clock cutoff. The arena can use the
+    // validated move retained by a time-limited search, just like self-play.
+    if (result.stoppedReason === 'time' && (!playOnTimeLimit || !next)) return stop('time-limit');
     if (result.stoppedReason === 'policy') return stop('policy-boundary');
     if (!next) return stop(!result.completed ? 'incomplete-search' : 'missing-action');
     let notation;

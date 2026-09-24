@@ -86,22 +86,25 @@ async function persistedIteration(runDir) {
 
 test('training options supply defaults and allow continuous runs with adjusted learning parameters', () => {
   assert.deepEqual(validateTrainingOptions({}), TRAINING_DEFAULTS);
-  const options = validateTrainingOptions({ iterations: 0, games: 3, device: 'cpu',
+  const options = validateTrainingOptions({ iterations: 0, games: 3, gameConcurrency: 8, device: 'cpu',
     learningRate: 0.001, exploration: 0, outcomeWeight: 1, arenaPairs: 2, minPairs: 1 });
   assert.equal(options.iterations, 0);
   assert.equal(options.games, 3);
+  assert.equal(options.gameConcurrency, 8);
   assert.equal(options.learningRate, 0.001);
   assert.equal(options.device, 'cpu');
   assert.equal(options.steps, TRAINING_DEFAULTS.steps);
   assert.equal(TRAINING_DEFAULTS.iterations, 1, 'Validation does not mutate shared defaults.');
+  assert.equal(TRAINING_DEFAULTS.gameConcurrency, 1, 'Training is sequential unless concurrency is requested.');
 });
 
 test('training options reject malformed numbers, invalid ranges and inconsistent promotion thresholds', () => {
   for (const value of [null, true, false, '', '2', [], {}, NaN, Infinity, -1, 1.5]) {
     assert.throws(() => validateTrainingOptions({ games: value }), /games/i, `Accepted games ${String(value)}`);
+    assert.throws(() => validateTrainingOptions({ gameConcurrency: value }), /game.?concurrency/i, `Accepted gameConcurrency ${String(value)}`);
   }
   for (const options of [
-    { games: 0 }, { iterations: -1 }, { batchSize: 129 }, { maxDepth: 17 },
+    { games: 0 }, { gameConcurrency: 0 }, { gameConcurrency: 9 }, { iterations: -1 }, { batchSize: 129 }, { maxDepth: 17 },
     { learningRate: 0 }, { learningRate: 0.11 }, { exploration: -0.01 }, { outcomeWeight: 1.01 },
     { promotionScore: 0.5 }, { promotionScore: 1.01 }, { arenaPairs: 1, minPairs: 2 }, { device: 'shell' },
   ]) assert.throws(() => validateTrainingOptions(options), undefined, JSON.stringify(options));
@@ -122,7 +125,7 @@ test('only one training start can win while availability is still being checked'
   const { manager, workers, calls } = await fixture(t, {
     availability: async () => { checking(); await pending; return { available: true }; },
   });
-  const first = manager.start({ games: 2, steps: 7 });
+  const first = manager.start({ games: 2, gameConcurrency: 2, steps: 7 });
   await entered;
   const second = manager.start({ games: 3 });
   releaseAvailability();
@@ -132,6 +135,7 @@ test('only one training start can win while availability is still being checked'
   assert.equal(rejected.reason.statusCode, 409);
   assert.equal(workers.length, 1);
   assert.equal(calls[0].options.games, 2);
+  assert.equal(calls[0].options.gameConcurrency, 2);
   assert.equal(calls[0].options.steps, 7);
   assert.equal(calls[0].cancelBuffer instanceof SharedArrayBuffer, true);
 });

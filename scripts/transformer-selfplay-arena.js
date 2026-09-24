@@ -113,7 +113,7 @@ export async function evaluateCandidate({ candidate, incumbent, suite, pairs: re
     ['maxPlies', maxPlies, 0, 10000], ['maxNodes', maxNodes, 0, 1e9], ['maxDepth', maxDepth, 1, 64],
     ['timeMs', timeMs, 1, 3600000], ['terminalWork', terminalWork, 0, 1e9],
   ]) integer(name, value, minimum, maximum);
-  const limits = { maxPlies, maxNodes, maxDepth, timeMs, terminalWork, quiescenceDepth: 0 };
+  const limits = { maxPlies, maxNodes, maxDepth, timeMs, terminalWork, quiescenceDepth: 0, playOnTimeLimit: true };
   let cancellation = null;
   function checkStopped() {
     if (!cancellation && shouldStop?.()) {
@@ -186,5 +186,5 @@ export async function evaluateCandidate({ candidate, incumbent, suite, pairs: re
       eligiblePairs: decision.eligiblePairs, uniqueStartingPositions: new Set(paired.map(pair => pair.initialKey)).size,
       completion: decision.completion,
       completedPairScore: summarizePairs(paired.map(pair => ({ ...pair, complete: pair.eligible }))) }, decision,
-    methodology: 'Deterministic case rotation by seed; distinct full-history starting positions only. Candidate A and incumbent B use equal limits and swapped colors. Only independently certified checkmate or stalemate finishes games. Unfinished games are not draws and neither evaluation scores nor ply limits adjudicate results. Only complete, valid, played pairs enter promotion scoring; any invalid game blocks promotion. Repeated arena selection can overfit this suite; no statistical strength guarantee.' };
+    methodology: 'Deterministic case rotation by seed; distinct full-history starting positions only. Candidate A and incumbent B use equal limits and swapped colors. Validated legal actions may play after a search time limit, including incomplete fallbacks; search interruption remains recorded. Time limits without an action leave games unfinished. Only independently certified checkmate or stalemate finishes games. Unfinished games are not draws and neither evaluation scores nor ply limits adjudicate results. Only complete, valid, played pairs enter promotion scoring; any invalid game blocks promotion. Repeated arena selection can overfit this suite; no statistical strength guarantee.' };
 }

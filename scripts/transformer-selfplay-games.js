@@ -1,4 +1,5 @@
 import { isDeepStrictEqual } from 'node:util';
+import { setImmediate as yieldTurn } from 'node:timers/promises';
 import { certifyTerminal } from './match.js';
 import { formatAction, generateActions, positionKey, validateAction } from '../src/rules.js';
 
@@ -9,24 +10,27 @@ const clone = value => structuredClone(value);
 const isScore = value => typeof value === 'number' && Number.isFinite(value);
 
 function settings(options) {
-  const limits = { games: 8, seed: 5, maxPlies: 40, timeMs: 1000, maxNodes: 20000, maxDepth: 2,
+  const limits = { games: 8, gameConcurrency: 1, seed: 5, maxPlies: 40, timeMs: 1000, maxNodes: 20000, maxDepth: 2,
     terminalWork: 20000, exploration: 0.15, explorationPlies: 8, outcomeWeight: 0.5, ...options };
-  for (const [name, low, high] of [['games', 1, 10000], ['seed', 0, 0xffffffff], ['maxPlies', 0, 10000],
+  for (const [name, low, high] of [['games', 1, 10000], ['gameConcurrency', 1, 8], ['seed', 0, 0xffffffff], ['maxPlies', 0, 10000],
     ['timeMs', 1, 60000], ['maxNodes', 0, 1e9], ['maxDepth', 1, 64], ['terminalWork', 0, 1e9], ['explorationPlies', 0, 10000]]) {
     if (!Number.isInteger(limits[name]) || limits[name] < low || limits[name] > high) throw new Error(`Invalid ${name}.`);
   }
   for (const name of ['exploration', 'outcomeWeight']) {
     if (typeof limits[name] !== 'number' || !Number.isFinite(limits[name]) || limits[name] < 0 || limits[name] > 1) throw new Error(`Invalid ${name}.`);
   }
-  return Object.fromEntries(['games', 'seed', 'maxPlies', 'timeMs', 'maxNodes', 'maxDepth', 'terminalWork', 'exploration', 'explorationPlies', 'outcomeWeight'].map(name => [name, limits[name]]));
+  return Object.fromEntries(['games', 'gameConcurrency', 'seed', 'maxPlies', 'timeMs', 'maxNodes', 'maxDepth', 'terminalWork', 'exploration', 'explorationPlies', 'outcomeWeight'].map(name => [name, limits[name]]));
 }
 
 /**
  * Generate legal Transformer-vs-itself trajectories and honest value targets.
  * analyzePosition(position, {timeMs,maxNodes,maxDepth,shouldStop}) must return a
  * Transformer search result, with White-centipawn score and a full-turn PV.
- * onGame(game, samples) is awaited after a game's result/validity is final, so
- * callers can stream files without retaining labels from later-invalid games.
+ * Up to gameConcurrency games run together; analyzePosition must support that
+ * many concurrent calls. Each game has its own deterministic exploration RNG.
+ * onGame(game, samples) is awaited after a game's result/validity is final, in
+ * completion order with no overlapping callbacks. Returned games and samples
+ * remain in original game-index order regardless of completion order.
  * Metadata is copied into provenance, e.g. checkpoint hash and training round.
  */
 export async function generateSelfPlayGames(options = {}) {
@@ -39,10 +43,12 @@ export async function generateSelfPlayGames(options = {}) {
   if (onGame !== undefined && typeof onGame !== 'function') throw new Error('onGame must be a function.');
   if (!metadata || typeof metadata !== 'object' || Array.isArray(metadata)) throw new Error('metadata must be an object.');
   const limits = settings(options), provenance = clone(metadata);
-  const records = [], samples = [];
-  let state = limits.seed >>> 0, cancelled = false;
-  const random = () => { state = (Math.imul(1664525, state) + 1013904223) >>> 0; return state / 4294967296; };
-  const stopped = () => Boolean(shouldStop?.());
+  const completedGames = [];
+  let cancelled = false, halted = false, failed = false, failure;
+  const stopped = () => {
+    if (!halted && shouldStop?.()) { cancelled = true; halted = true; }
+    return halted;
+  };
   const check = () => { if (stopped()) throw new Interrupted('cancelled'); };
 
   function terminal(position) {
@@ -79,7 +85,7 @@ export async function generateSelfPlayGames(options = {}) {
       ]);
     } finally { clearTimeout(timer); }
   }
-  function explore(position) {
+  function explore(position, random) {
     const deadline = performance.now() + limits.timeMs;
     const choices = [];
     let work = 0, reason = null, exhaustive = false;
@@ -105,8 +111,11 @@ export async function generateSelfPlayGames(options = {}) {
       candidates: choices.length, work, exhaustive, stoppedReason: reason };
   }
 
-  for (let index = 0; index < limits.games; index++) {
-    if (stopped()) { cancelled = true; break; }
+  async function playGame(index) {
+    // Derive an independent stream from the cycle seed and stable game index,
+    // so scheduling and other games' lengths cannot change this trajectory.
+    let state = (limits.seed + Math.imul(index, 0x9e3779b9)) >>> 0;
+    const random = () => { state = (Math.imul(1664525, state) + 1013904223) >>> 0; return state / 4294967296; };
     const start = positions[(limits.seed % positions.length + index) % positions.length];
     let current = clone(start.position);
     const gameId = `${provenance.runId ?? 'selfplay'}:${limits.seed}:${index + 1}`;
@@ -120,6 +129,9 @@ export async function generateSelfPlayGames(options = {}) {
       winnerColor: certificate.winnerColor, outcomeWhite: certificate.winnerColor === null ? 0 : certificate.winnerColor === 0 ? 1 : -1 });
     try {
       for (let ply = 0; ply <= limits.maxPlies; ply++) {
+        // Full-rules validation runs in the coordinator. Yield between plies
+        // so other workers' IPC, cancellation and time budgets stay responsive.
+        await yieldTurn();
         check();
         if (ply === limits.maxPlies) {
           const certificate = terminal(current);
@@ -186,7 +198,7 @@ export async function generateSelfPlayGames(options = {}) {
         let action = result.bestAction, next = searchedNext;
         let explorationInfo = { attempted: false, explored: false, candidates: 0, work: 0 };
         if (ply < limits.explorationPlies && random() < limits.exploration) {
-          const exploration = explore(current);
+          const exploration = explore(current, random);
           if (exploration.action) {
             action = exploration.action;
             try { next = validateAction(current, action); }
@@ -211,7 +223,7 @@ export async function generateSelfPlayGames(options = {}) {
     } catch (error) {
       if (error instanceof Interrupted) {
         finish(error.reason);
-        if (error.reason === 'cancelled') cancelled = true;
+        if (error.reason === 'cancelled') { cancelled = true; halted = true; }
       } else finish('game-error', { valid: false, error: error.message });
     }
     Object.assign(game, { plies: game.moves.length, finalPosition: clone(current), finalKey: positionKey(current) });
@@ -228,10 +240,36 @@ export async function generateSelfPlayGames(options = {}) {
     }) : [];
     game.samples = gameSamples.length;
     game.discardedSamples = game.valid ? 0 : pending.length;
-    records.push(game); samples.push(...gameSamples);
-    if (onGame) await onGame(clone(game), clone(gameSamples));
-    if (cancelled) break;
+    return { game, samples: gameSamples };
   }
+  let nextIndex = 0, streamTail = Promise.resolve();
+  async function lane() {
+    try {
+      while (!stopped() && nextIndex < limits.games) {
+        const index = nextIndex++;
+        const completed = await playGame(index);
+        completedGames[index] = completed;
+        if (onGame) {
+          const streaming = streamTail.then(async () => {
+            if (failed) return;
+            try { await onGame(clone(completed.game), clone(completed.samples)); }
+            catch (error) { halted = true; failed = true; failure = error; throw error; }
+          });
+          // Attach the rejection handler immediately; every lane is drained
+          // below even when a writer fails while other searches are pending.
+          streamTail = streaming.catch(() => {});
+          await streaming;
+        }
+      }
+    } catch (error) {
+      halted = true;
+      if (!failed) { failed = true; failure = error; }
+    }
+  }
+  await Promise.all(Array.from({ length: Math.min(limits.gameConcurrency, limits.games) }, () => lane()));
+  if (failed) throw failure;
+  const records = completedGames.filter(Boolean).map(completed => completed.game);
+  const samples = completedGames.filter(Boolean).flatMap(completed => completed.samples);
   const summary = { requestedGames: limits.games, games: records.length, valid: records.filter(game => game.valid).length,
     invalid: records.filter(game => !game.valid).length, finished: records.filter(game => game.valid && game.result !== 'UNFINISHED').length,
     unfinished: records.filter(game => game.result === 'UNFINISHED').length,

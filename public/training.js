@@ -4,6 +4,7 @@ const fields = [
   { key:'iterations', label:'Iterations', min:0, max:1000000, help:'0 runs continuously', group:'Run length' },
   { key:'device', label:'Device', choices:[['auto','Automatic'],['cuda','CUDA / GPU'],['cpu','CPU']], group:'Run length' },
   { key:'games', label:'Games / iteration', min:1, max:128, group:'Self-play' },
+  { key:'gameConcurrency', label:'Concurrent games', min:1, max:8, help:'Self-play games share inference; higher values use more CPU', group:'Self-play' },
   { key:'maxPlies', label:'Turns / game', min:1, max:256, group:'Self-play' },
   { key:'exploration', label:'Exploration chance', min:0, max:1, step:'any', help:'0–1 · early random turns', group:'Self-play' },
   { key:'explorationPlies', label:'Exploration turns', min:0, max:256, help:'At the start of each game', group:'Self-play' },

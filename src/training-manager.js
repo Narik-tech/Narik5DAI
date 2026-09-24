@@ -5,7 +5,7 @@ import { getSelfPlayDefaults, parseArguments } from '../scripts/transformer-self
 import { DEFAULT_CHECKPOINT, DEFAULT_PYTHON } from './transformer-runtime.js';
 import { raw, positionKey, validateAction } from './rules.js';
 
-const optionFlags = Object.freeze({ iterations: 'iterations', games: 'games', maxPlies: 'plies', maxNodes: 'nodes',
+const optionFlags = Object.freeze({ iterations: 'iterations', games: 'games', gameConcurrency: 'game-concurrency', maxPlies: 'plies', maxNodes: 'nodes',
   maxDepth: 'depth', timeMs: 'time-ms', terminalWork: 'terminal-work', exploration: 'exploration',
   explorationPlies: 'exploration-plies', outcomeWeight: 'outcome-weight', steps: 'steps', batchSize: 'batch-size',
   learningRate: 'learning-rate', replaySize: 'replay-size', seed: 'seed', arenaPairs: 'arena-pairs',

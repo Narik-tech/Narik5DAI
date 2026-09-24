@@ -17,7 +17,7 @@ transformer Python environment are required to start training; saved games can
 be reviewed without starting a model.
 
 Adjust the parameters before starting a run. Settings cover cycle count
-(`0` means continuous), self-play games and turn limits, search budgets,
+(`0` means continuous), self-play games, concurrent games and turn limits, search budgets,
 training updates, batch size, learning rate, replay capacity, exploration,
 device, and the paired promotion gate. Changes apply to the next run.
 Browser preferences are saved locally; each cycle also records its exact
@@ -55,6 +55,25 @@ Continuous operation until **Ctrl+C**:
 ```powershell
 node scripts/transformer-selfplay.js --iterations 0 --device cuda
 ```
+
+To play up to four self-play games concurrently:
+
+```powershell
+node scripts/transformer-selfplay.js --iterations 0 --device cuda --game-concurrency 4
+```
+
+The Training page exposes the same **Concurrent games** setting. It accepts
+1–8 and defaults to 1; actual concurrency is capped by `--games`. Each active
+game searches in its own CPU worker, sharing one loaded inference model. The
+inference queue drops cancelled work before sending it to Python and keeps at
+most one request in flight. This avoids multiplying GPU model memory. Training
+updates and the paired promotion arena still run after generation, sequentially.
+
+Start with 2 or 4 when CPU capacity permits. More workers use more CPU and
+memory; speedup depends on the positions and inference load. Rules validation,
+exploration and terminal certification share the coordinator, and search time
+limits still use wall time, so contention can reduce completed search depth.
+Lower concurrency if timeouts increase.
 
 For continuous operation with automatic device selection (CUDA when available),
 the shortcut requires no forwarded arguments:
@@ -104,6 +123,7 @@ if you want to preserve an earlier check's copied checkpoint.
 | --- | --- |
 | Cycles per invocation | 1; `--iterations 0` runs continuously |
 | Self-play | 8 games, 40 complete turns/game |
+| Concurrent self-play games | 1; `--game-concurrency` accepts 1–8 |
 | Search per turn | Depth 2, 20,000 work units, 3 seconds |
 | Exploration | 20% probability during the first 12 turns |
 | Training | 500 additional updates, batch 16, learning rate 0.0001 |
@@ -117,8 +137,12 @@ See all options with `node scripts/transformer-selfplay.js --help`.
 `--plies` counts submitted full player turns, including turns requiring moves
 on multiple boards. Exploration samples from a bounded prefix of up to 32 legal
 complete turns; it is not uniform over the entire 5D action space. Seeds control
-case rotation and exploration, although wall-clock limits and CUDA kernels can
-still affect reproducibility.
+case rotation and exploration. Each game's exploration has its own random
+stream derived from the cycle seed and game index, independent of completion
+order; this changes the old shared random stream for later games. Wall-clock
+limits and CUDA kernels can still affect reproducibility. Game files keep their
+scheduled numbers even when games finish out of order, while live events also
+report `completedGames`. Replay receives samples in scheduled game order.
 
 The model has a value head. This is search distillation with outcome targets,
 not an AlphaZero policy/MCTS implementation. Every training score is relative
@@ -193,9 +217,14 @@ separately. Completion rates describe the joint match, not which engine caused
 a game to stop. They are diagnostic metrics and do not change the promotion gate.
 
 If too few pairs finish, inspect the recorded reasons and increase `--arena-plies`,
-`--nodes` or `--time-ms`, or supply suitable nonterminal miniature starts. A time
-cap in the arena ends the game as unfinished; a node-budget fallback can still
-play if legal. Do not count unfinished games as draws to force acceptance.
+`--nodes` or `--time-ms`, or supply suitable nonterminal miniature starts. A legal
+move retained when an arena search reaches its time or node budget still plays,
+including an unscored fallback from an incomplete iteration. Its search record
+preserves the cutoff reason and completion status. If no move is available, the
+game stays unfinished unless terminal verification proves checkmate or stalemate.
+Terminal verification limits also leave games unfinished. The separate fixed-work
+match benchmark still stops on time cutoffs. Do not count unfinished games as
+draws to force acceptance.
 
 This is a conservative operational gate, not a guarantee of improvement or an
 Elo estimate. A small or repeatedly used selection suite can be overfit. The
@@ -257,12 +286,17 @@ Get-Content artifacts/transformer/selfplay/iteration-00000001/train.log -Tail 10
 The runner prints JSON events after each game and phase, plus a heartbeat during
 long training. Search runs in terminable workers with a hard safety deadline;
 exploration and full-rules terminal verification use cooperative work/time caps.
+Stopping prevents new games from starting, signals all active searches, and
+waits for their workers to exit before releasing the run locks. Completed game
+records are saved as they finish, including during a cooperative stop.
 
 ## Verification
 
 `node --test` covers game legality, outcomes for both colors, target blending,
 unfinished games, exploration, invalid-result rejection, cancellation, replay
 deduplication/mixing, atomic checkpoint replacement, locks, and the paired gate.
+Concurrency tests cover bounded overlap, completion order, per-game random
+streams, cancellation, failed record writes and the shared inference queue.
 Training UI tests also cover parameter validation, concurrent starts, cooperative
 stop and shutdown, external runner locks, history browsing, and read-only legal
 replay. These tests use temporary artifacts and fake workers. The optional

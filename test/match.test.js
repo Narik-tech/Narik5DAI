@@ -127,6 +127,36 @@ test('a validated incomplete fallback remains playable and is counted in the rep
   assert.equal(summarizeGames([game]).incompleteSearchMoves, 1);
 });
 
+test('time-budget play is explicit and does not forgive absent actions or policy stops', async () => {
+  for (const completed of [true, false]) {
+    const engine = position => firstLegal(position, { completed, status: completed ? 'ok' : 'incomplete',
+      stoppedReason: 'time', score: completed ? 42 : null });
+    const game = await runGame({ position: tiny(), ...options, maxPlies: 1,
+      playOnTimeLimit: true, engineA: engine, engineB: engine });
+    assert.equal(game.playOnTimeLimit, true);
+    assert.equal(game.plies, 1);
+    assert.equal(game.reason, 'ply-limit');
+    assert.equal(game.result, 'UNFINISHED');
+    assert.equal(game.moves[0].search.completed, completed);
+    assert.equal(game.moves[0].search.stoppedReason, 'time');
+    assert.equal(game.moves[0].search.score, completed ? 42 : null);
+    assert.equal(positionKey(validateAction(game.initialPosition, game.moves[0].action)), game.finalKey);
+    assert.equal(summarizeGames([game]).incompleteSearchMoves, completed ? 0 : 1);
+  }
+  for (const [overrides, reason] of [
+    [{ stoppedReason: 'time', bestAction: null, pv: [], completed: false }, 'time-limit'],
+    [{ stoppedReason: 'policy' }, 'policy-boundary'],
+  ]) {
+    const game = await runGame({ position: tiny(), ...options, playOnTimeLimit: true,
+      engineA: position => firstLegal(position, overrides), engineB: firstLegal });
+    assert.equal(game.plies, 0);
+    assert.equal(game.reason, reason);
+    assert.equal(game.result, 'UNFINISHED');
+    assert.equal(game.valid, true);
+  }
+  await assert.rejects(runGame({ position: tiny(), playOnTimeLimit: 'true' }), /playOnTimeLimit/);
+});
+
 test('illegal later principal-variation actions invalidate a search result', async () => {
   const engineA = position => {
     const result = firstLegal(position);

@@ -10,11 +10,12 @@ import { TransformerRuntime, DEFAULT_CHECKPOINT, DEFAULT_PYTHON, PROJECT_ROOT, f
 import { positionKey } from '../src/rules.js';
 import { loadMatchSuite } from './match.js';
 import { generateSelfPlayGames } from './transformer-selfplay-games.js';
+import { createInferenceQueue } from './transformer-selfplay-inference.js';
 import { evaluateCandidate } from './transformer-selfplay-arena.js';
 import { atomicWrite, fileHash, acquireRunLock, updateReplay, promoteCheckpoint } from './transformer-selfplay-store.js';
 
 const defaults = {
-  iterations: 1, games: 8, maxPlies: 40, maxNodes: 20000, maxDepth: 2, timeMs: 3000,
+  iterations: 1, games: 8, gameConcurrency: 1, maxPlies: 40, maxNodes: 20000, maxDepth: 2, timeMs: 3000,
   terminalWork: 20000, exploration: .2, explorationPlies: 12, outcomeWeight: .5,
   steps: 500, batchSize: 16, learningRate: .0001, replaySize: 8192, seed: 42,
   arenaPairs: 8, minPairs: 4, arenaPlies: 80, promotionScore: .55, keepIterations: 5,
@@ -33,6 +34,7 @@ export const help = `Usage: node scripts/transformer-selfplay.js [options]
 Continuous shortcut: npm run transformer:selfplay:continuous
   --iterations N       Cycles this invocation; 0 = until Ctrl+C (default 1)
   --games N            Self-play games/cycle (8)
+  --game-concurrency N Concurrent self-play games, 1..8; shared model (1)
   --plies N            Self-play turn cap (40)
   --nodes N            Per-turn search work (20000)
   --depth N            Neural search depth (2)
@@ -64,7 +66,7 @@ with persisted replay and the active model. Incomplete cycles are not promoted.`
 
 export function parseArguments(args, initialOptions = defaults) {
   const options = { ...initialOptions };
-  const names = { iterations: 'iterations', games: 'games', plies: 'maxPlies', nodes: 'maxNodes', depth: 'maxDepth',
+  const names = { iterations: 'iterations', games: 'games', 'game-concurrency': 'gameConcurrency', plies: 'maxPlies', nodes: 'maxNodes', depth: 'maxDepth',
     'time-ms': 'timeMs', 'terminal-work': 'terminalWork', exploration: 'exploration', 'exploration-plies': 'explorationPlies',
     'outcome-weight': 'outcomeWeight', steps: 'steps', 'batch-size': 'batchSize', 'learning-rate': 'learningRate',
     'replay-size': 'replaySize', seed: 'seed', 'arena-pairs': 'arenaPairs', 'min-pairs': 'minPairs',
@@ -83,7 +85,7 @@ export function parseArguments(args, initialOptions = defaults) {
     else throw new Error(`Unknown option --${flag}.`);
   }
   for (const [name, min, max] of [
-    ['iterations', 0, 1000000], ['games', 1, 128], ['maxPlies', 1, 256], ['maxNodes', 1, 10000000],
+    ['iterations', 0, 1000000], ['games', 1, 128], ['gameConcurrency', 1, 8], ['maxPlies', 1, 256], ['maxNodes', 1, 10000000],
     ['maxDepth', 1, 16], ['timeMs', 1, 60000], ['terminalWork', 1, 10000000], ['explorationPlies', 0, 256],
     ['steps', 1, 1000000], ['batchSize', 1, 128], ['replaySize', 1, 100000], ['seed', 0, 0xffffffff],
     ['arenaPairs', 1, 128], ['minPairs', 1, 128], ['arenaPlies', 1, 256], ['keepIterations', 1, 100],
@@ -114,40 +116,77 @@ const emit = (event, fields = {}) => console.log(JSON.stringify({ event, ...fiel
 const json = value => JSON.stringify(value, null, 2) + '\n';
 
 /** CPU search runs in a worker so its safety deadline can interrupt eager rules code. */
-export function workerAnalyzer(runtime, shouldStop = () => false) {
-  return async (position, options) => {
-    const stopped = () => shouldStop() || Boolean(options.shouldStop?.());
+export function workerAnalyzer(runtime, shouldStop = () => false, maxConcurrency = 1) {
+  if (!Number.isInteger(maxConcurrency) || maxConcurrency < 1 || maxConcurrency > 8) throw new Error('Invalid search worker concurrency.');
+  const inference = createInferenceQueue(runtime), active = new Set(), cancellations = new Set();
+  const slots = new Set();
+  let closed = false;
+  const search = async (position, options) => {
+    const stopped = () => closed || shouldStop() || Boolean(options.shouldStop?.());
     checkStop(stopped);
     const info = await runtime.start();
     checkStop(stopped);
+    // A game can hit its transport timeout before its old worker has exited.
+    // Hold a physical slot through termination so its replacement cannot
+    // transiently exceed the configured number of CPU workers.
+    while (slots.size >= maxConcurrency) {
+      await Promise.race(slots);
+      checkStop(stopped);
+    }
+    let releaseSlot;
+    const slot = new Promise(resolve => { releaseSlot = resolve; });
+    slots.add(slot);
     const cancelBuffer = new SharedArrayBuffer(4), cancellation = new Int32Array(cancelBuffer);
-    const worker = new Worker(new URL('../src/worker.js', import.meta.url), { workerData: {
-      position, cancelBuffer, model: info.model,
-      options: { engine: 'transformer', timeMs: options.timeMs, maxNodes: options.maxNodes, maxDepth: options.maxDepth },
-    } });
+    const controller = new AbortController();
+    let worker;
     try {
+      worker = new Worker(new URL('../src/worker.js', import.meta.url), { workerData: {
+        position, cancelBuffer, model: info.model,
+        options: { engine: 'transformer', timeMs: options.timeMs, maxNodes: options.maxNodes, maxDepth: options.maxDepth },
+      } });
       return await new Promise((resolve, reject) => {
         let finished = false;
         const finish = (error, result) => {
           if (finished) return;
           finished = true; clearInterval(poll); clearTimeout(deadline);
+          cancellations.delete(stop);
+          controller.abort();
           if (error) reject(error); else resolve(result);
         };
+        const stop = () => { Atomics.store(cancellation, 0, 1); finish(cancelled()); };
+        cancellations.add(stop);
         const poll = setInterval(() => {
-          if (stopped()) { Atomics.store(cancellation, 0, 1); finish(cancelled()); }
+          if (stopped()) stop();
         }, 25);
         const deadline = setTimeout(() => finish(new Error('Search worker exceeded its hard safety deadline.')), options.timeMs + 5000);
         worker.on('message', message => {
           if (finished) return;
-          if (message.type === 'evaluate') void forwardInference(worker, runtime, message);
+          if (message.type === 'evaluate') void forwardInference(worker, {
+            evaluate: positions => inference.evaluate(positions, { signal: controller.signal }),
+          }, message);
           else if (message.type === 'result') finish(null, message.result);
           else if (message.type === 'error') finish(new Error(message.error));
         });
         worker.once('error', error => finish(error));
         worker.once('exit', code => { if (!finished) finish(new Error(`Search worker exited without a result (${code}).`)); });
       });
-    } finally { await worker.terminate(); }
+    } finally {
+      try { await worker?.terminate(); }
+      finally { slots.delete(slot); releaseSlot(); }
+    }
   };
+  const analyze = (position, options) => {
+    const task = search(position, options);
+    active.add(task);
+    task.then(() => active.delete(task), () => active.delete(task));
+    return task;
+  };
+  analyze.close = async () => {
+    closed = true;
+    for (const stop of cancellations) stop();
+    await Promise.allSettled([...active]);
+  };
+  return analyze;
 }
 
 async function trainCandidate(options, files, seed, shouldStop, onEvent = emit) {
@@ -212,12 +251,21 @@ export async function runSelfPlay(options, { shouldStop = () => false, onRuntime
   validateManagedPaths(options);
   const release = await acquireRunLock(options.runDir);
   let releaseModel;
-  const runtimes = new Set();
+  const runtimes = new Set(), analyzers = new Set();
   const openRuntime = checkpoint => {
     const runtime = new TransformerRuntime({ checkpoint, python: options.python, device: options.device });
     runtimes.add(runtime); onRuntime(runtime); return runtime;
   };
-  const closeRuntimes = () => { for (const runtime of runtimes) runtime.close(); runtimes.clear(); };
+  const openAnalyzer = (runtime, concurrency = 1) => {
+    const analyzer = workerAnalyzer(runtime, shouldStop, concurrency);
+    analyzers.add(analyzer);
+    return analyzer;
+  };
+  const closeRuntimes = async () => {
+    for (const runtime of runtimes) runtime.close();
+    await Promise.all([...analyzers].map(analyzer => analyzer.close()));
+    runtimes.clear(); analyzers.clear();
+  };
   try {
     // A common checkpoint lock also excludes runners using different run directories.
     releaseModel = await acquireRunLock(`${options.checkpoint}.selfplay-lock`);
@@ -259,19 +307,21 @@ export async function runSelfPlay(options, { shouldStop = () => false, onRuntime
         await atomicWrite(files.incumbent, snapshot);
         const runtime = openRuntime(files.incumbent);
         const info = await runtime.start();
-        onEvent('selfplay-start', { iteration, folder, seed, device: info.device, trainedSteps: info.model.trainedSteps });
-        let gameIndex = 0;
+        onEvent('selfplay-start', { iteration, folder, seed, device: info.device, trainedSteps: info.model.trainedSteps,
+          gameConcurrency: Math.min(options.gameConcurrency ?? 1, options.games) });
+        let completedGames = 0;
         const play = await generateSelfPlayGames({ ...options, positions: trainingSuite.cases, seed,
-          analyzePosition: workerAnalyzer(runtime, shouldStop), shouldStop,
+          analyzePosition: openAnalyzer(runtime, options.gameConcurrency ?? 1), shouldStop,
           metadata: { runId: run.runId, iteration, checkpointSha256: incumbentHash, trainedSteps: info.model.trainedSteps },
           onGame: async (game, samples) => {
-            const number = String(++gameIndex).padStart(3, '0');
+            const number = String(game.index + 1).padStart(3, '0');
             await atomicWrite(path.join(folder, `selfplay-${number}.json`), json(game));
             await atomicWrite(path.join(folder, `samples-${number}.jsonl`), samples.map(row => JSON.stringify(row)).join('\n') + (samples.length ? '\n' : ''));
-            onEvent('selfplay-game', { iteration, game: gameIndex, result: game.result, reason: game.reason, samples: samples.length });
+            onEvent('selfplay-game', { iteration, game: game.index + 1, completedGames: ++completedGames,
+              result: game.result, reason: game.reason, samples: samples.length });
           } });
         report.selfplay = play.summary; report.incumbentSha256 = incumbentHash;
-        closeRuntimes(); checkStop(shouldStop);
+        await closeRuntimes(); checkStop(shouldStop);
         if (play.games.some(game => !game.valid)) throw new Error('Invalid self-play game; candidate training skipped. See game records.');
         if (!play.samples.length) throw new Error('No completed finite search targets. Increase --nodes/--time-ms or change --suite.');
         report.replay = await updateReplay({ replayPath: replay, newSamples: play.samples, seedData: options.seedData,
@@ -285,7 +335,7 @@ export async function runSelfPlay(options, { shouldStop = () => false, onRuntime
         report.candidate = candidateInfo.model; report.candidateSha256 = await fileHash(files.candidate);
         onEvent('arena-start', { iteration, pairs: options.arenaPairs, trainedSteps: candidateInfo.model.trainedSteps });
         let arenaIndex = 0;
-        const arena = await evaluateCandidate({ candidate: workerAnalyzer(candidate, shouldStop), incumbent: workerAnalyzer(incumbent, shouldStop),
+        const arena = await evaluateCandidate({ candidate: openAnalyzer(candidate), incumbent: openAnalyzer(incumbent),
           suite: arenaSuite, pairs: options.arenaPairs, seed, maxPlies: options.arenaPlies, maxNodes: options.maxNodes,
           maxDepth: options.maxDepth, timeMs: options.timeMs, terminalWork: options.terminalWork,
           minPairs: options.minPairs, promotionScore: options.promotionScore, shouldStop,
@@ -293,7 +343,7 @@ export async function runSelfPlay(options, { shouldStop = () => false, onRuntime
             await atomicWrite(path.join(folder, `arena-${String(++arenaIndex).padStart(3, '0')}.json`), json(game));
             onEvent('arena-game', { iteration, game: arenaIndex, result: game.result, reason: game.reason });
           } });
-        closeRuntimes(); checkStop(shouldStop);
+        await closeRuntimes(); checkStop(shouldStop);
         await atomicWrite(path.join(folder, 'arena.json'), json(arena));
         report.arena = { summary: arena.summary, decision: arena.decision };
         // Persist the decision before any replacement so even an interrupted promotion is auditable.
@@ -314,10 +364,10 @@ export async function runSelfPlay(options, { shouldStop = () => false, onRuntime
       } catch (error) {
         report.status = shouldStop() || error.name === 'AbortError' ? 'interrupted' : 'failed';
         report.error = error.message; report.finishedAt = new Date().toISOString(); await saveReport(); throw error;
-      } finally { closeRuntimes(); }
+      } finally { await closeRuntimes(); }
     }
     return reports;
-  } finally { closeRuntimes(); await releaseModel?.(); await release(); }
+  } finally { await closeRuntimes(); await releaseModel?.(); await release(); }
 }
 
 if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {

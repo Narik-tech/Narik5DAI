@@ -1,7 +1,8 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { createPosition, generateActions } from '../src/rules.js';
+import { createPosition, generateActions, positionKey, validateAction } from '../src/rules.js';
 import { analyze } from '../src/search.js';
+import { analyze as analyzeTransformer } from '../src/transformer-search.js';
 import { decidePromotion, evaluateCandidate } from '../scripts/transformer-selfplay-arena.js';
 
 const tiny = () => createPosition({ pgn: '[Board "Custom"]\n[Size "4x4"]\n[2rk/4/4/KR2:0:1:w]' });
@@ -151,6 +152,82 @@ test('real one-turn mates complete a balanced meaningful pair and do not promote
   assert.equal(report.summary.completion.gameCompletionRate, 1);
   assert.equal(report.summary.completion.pairCompletionRate, 1);
   assert.equal(report.summary.completion.eligiblePairRate, 1);
+});
+
+test('arena plays completed and incomplete time-limited legal actions with both color assignments', async () => {
+  for (const completed of [true, false]) {
+    const engine = position => ({ ...firstLegal(position), completed, stoppedReason: 'time',
+      status: completed ? 'ok' : 'incomplete', score: completed ? 42 : null });
+    const report = await evaluateCandidate({ candidate: engine, incumbent: engine,
+      suite: { cases: [{ id: 'tiny', position: tiny() }] }, pairs: 1, minPairs: 1, ...limits, maxPlies: 2 });
+    assert.equal(report.limits.playOnTimeLimit, true);
+    assert.deepEqual(report.games.map(game => game.aColor), [0, 1]);
+    assert.deepEqual(report.games.map(game => game.moves.map(move => move.engine)), [['A', 'B'], ['B', 'A']]);
+    assert.equal(report.summary.incompleteSearchMoves, completed ? 0 : 4);
+    for (const game of report.games) {
+      assert.equal(game.valid, true);
+      assert.equal(game.plies, 2);
+      assert.equal(game.reason, 'ply-limit');
+      let replay = game.initialPosition;
+      for (const move of game.moves) {
+        assert.equal(move.search.stoppedReason, 'time');
+        assert.equal(move.search.completed, completed);
+        assert.equal(move.search.score, completed ? 42 : null);
+        assert.equal(move.beforeKey, positionKey(replay));
+        replay = validateAction(replay, move.action);
+        assert.equal(move.afterKey, positionKey(replay));
+      }
+      assert.equal(game.finalKey, positionKey(replay));
+    }
+  }
+});
+
+test('arena time fallback does not forgive absent actions, illegal actions or invalid PVs', async () => {
+  const illegal = [[[0, 0, 0, 0], [0, 0, 3, 3]]];
+  for (const [patch, reason, valid] of [
+    [{ bestAction: null, pv: [] }, 'time-limit', true],
+    [{ bestAction: illegal, pv: [illegal] }, 'illegal-action', false],
+    [{ pv: [illegal] }, 'invalid-pv', false],
+  ]) {
+    const engine = position => ({ ...firstLegal(position), completed: false,
+      status: 'incomplete', stoppedReason: 'time', ...patch });
+    const report = await evaluateCandidate({ candidate: engine, incumbent: engine,
+      suite: { cases: [{ id: 'tiny', position: tiny() }] }, pairs: 1, minPairs: 1, ...limits });
+    for (const game of report.games) {
+      assert.equal(game.plies, 0);
+      assert.equal(game.result, 'UNFINISHED');
+      assert.equal(game.reason, reason);
+      assert.equal(game.valid, valid);
+    }
+    assert.equal(report.decision.promote, false);
+    assert.equal(report.decision.eligiblePairs, 0);
+    assert.equal(report.decision.invalidGames, valid ? 0 : 2);
+  }
+});
+
+test('real Transformer search retains and plays its legal fallback when inference reaches the deadline', async t => {
+  let now = 0, inferenceCalls = 0;
+  t.mock.method(performance, 'now', () => now);
+  const engine = (position, options) => analyzeTransformer(position, { ...options, candidateLimit: 1,
+    evaluateBatch: async positions => {
+      inferenceCalls++;
+      now += options.timeMs;
+      return positions.map(() => 0);
+    },
+  });
+  const report = await evaluateCandidate({ candidate: engine, incumbent: engine,
+    suite: { cases: [{ id: 'tiny', position: tiny() }] }, pairs: 1, minPairs: 1, ...limits });
+  assert.equal(inferenceCalls, 2);
+  assert.equal(report.summary.incompleteSearchMoves, 2);
+  for (const game of report.games) {
+    assert.equal(game.valid, true);
+    assert.equal(game.plies, 1);
+    assert.equal(game.reason, 'ply-limit');
+    assert.equal(game.moves[0].search.stoppedReason, 'time');
+    assert.equal(game.moves[0].search.completed, false);
+    assert.equal(game.moves[0].search.score, null);
+    assert.equal(positionKey(validateAction(game.initialPosition, game.moves[0].action)), game.finalKey);
+  }
 });
 
 test('cancellation rejects before games and while awaiting an unresponsive engine', async () => {

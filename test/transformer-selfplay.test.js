@@ -7,16 +7,19 @@ import { createPosition } from '../src/rules.js';
 test('self-play CLI defaults to one bounded cycle and accepts continuous mode', () => {
   const defaults = parseArguments([]);
   assert.equal(defaults.iterations, 1);
+  assert.equal(defaults.gameConcurrency, 1);
   assert.equal(defaults.device, process.env.TRANSFORMER_DEVICE || 'auto');
   assert.ok(defaults.minPairs <= defaults.arenaPairs);
-  const options = parseArguments(['--iterations', '0', '--seed-data', 'none', '--device', 'cpu', '--steps', '3']);
+  const options = parseArguments(['--iterations', '0', '--seed-data', 'none', '--device', 'cpu', '--steps', '3', '--game-concurrency', '4']);
   assert.equal(options.iterations, 0);
   assert.equal(options.seedData, undefined);
   assert.equal(options.steps, 3);
+  assert.equal(options.gameConcurrency, 4);
 });
 
 test('self-play CLI rejects malformed limits and unsafe promotion thresholds', () => {
   for (const args of [ ['--games', '0'], ['--steps', '1.5'], ['--nodes', 'NaN'], ['--iterations', '-1'],
+    ['--game-concurrency', '0'], ['--game-concurrency', '9'], ['--game-concurrency', '1.5'], ['--game-concurrency', 'NaN'],
     ['--exploration', '1.1'], ['--outcome-weight', '-.1'], ['--promotion-score', '.5'],
     ['--arena-pairs', '2', '--min-pairs', '3'], ['--batch-size', '129'], ['--device', 'bogus'], ['--steps'], ['--bogus', '1'] ]) {
     assert.throws(() => parseArguments(args), undefined, args.join(' '));
@@ -50,4 +53,42 @@ test('worker transport honors a per-search cancellation callback and terminates 
       maxDepth: 2, maxNodes: 20000, timeMs: 1000, shouldStop: () => stop,
     }), { name: 'AbortError' });
   } finally { clearTimeout(timer); }
+});
+
+test('parallel search workers share inference and route independent evaluations correctly', async () => {
+  let active = 0, peak = 0, calls = 0;
+  const runtime = {
+    start: async () => ({ model: {} }),
+    async evaluate(positions) {
+      calls++; peak = Math.max(peak, ++active);
+      await new Promise(resolve => setTimeout(resolve, 5));
+      active--;
+      return { values: positions.map(() => 75) };
+    },
+  };
+  const analyzer = workerAnalyzer(runtime, undefined, 3);
+  try {
+    const results = await Promise.all(Array.from({ length: 3 }, () => analyzer(createPosition(), {
+      maxDepth: 1, maxNodes: 20000, timeMs: 10000,
+    })));
+    assert.ok(calls >= 3);
+    assert.equal(peak, 1);
+    for (const result of results) {
+      assert.equal(result.completed, true);
+      assert.equal(result.engine, 'transformer');
+      assert.equal(result.score, 75);
+      assert.ok(result.bestAction.length);
+    }
+  } finally { await analyzer.close(); }
+});
+
+test('closing a shared analyzer cancels and drains every search worker', async () => {
+  const analyzer = workerAnalyzer({ start: async () => ({ model: {} }), evaluate: async () => new Promise(() => {}) }, undefined, 2);
+  const requests = Array.from({ length: 3 }, () => assert.rejects(analyzer(createPosition(), {
+    maxDepth: 2, maxNodes: 20000, timeMs: 10000,
+  }), { name: 'AbortError' }));
+  await new Promise(resolve => setTimeout(resolve, 50));
+  await analyzer.close();
+  await Promise.all(requests);
+  await assert.rejects(analyzer(createPosition(), { timeMs: 10000 }), { name: 'AbortError' });
 });

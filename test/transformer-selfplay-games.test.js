@@ -33,6 +33,118 @@ function replay(game) {
   assert.equal(positionKey(position), game.finalKey);
   return position;
 }
+const nextTurn = () => new Promise(resolve => setImmediate(resolve));
+function deferred() {
+  let resolve;
+  const promise = new Promise(done => { resolve = done; });
+  return { promise, resolve };
+}
+
+test('concurrent games bound overlapping searches, stream completion order and return stable indices', async () => {
+  const firstGame = deferred(), seen = [];
+  let launched = 0, active = 0, peak = 0, writing = 0, peakWriting = 0;
+  const result = await generateSelfPlayGames({ ...limits, positions: starts(), games: 5, gameConcurrency: 2, maxPlies: 1,
+    analyzePosition: async position => {
+      const index = launched++;
+      peak = Math.max(peak, ++active);
+      try {
+        if (index === 0) await firstGame.promise;
+        return firstLegal(position);
+      } finally { active--; }
+    },
+    onGame: async game => {
+      peakWriting = Math.max(peakWriting, ++writing);
+      await nextTurn();
+      seen.push(game.index);
+      if (game.index === 3) firstGame.resolve();
+      writing--;
+    },
+  });
+  assert.equal(peak, 2);
+  assert.equal(active, 0);
+  assert.equal(peakWriting, 1, 'Streaming writes must not overlap.');
+  assert.deepEqual(seen.slice(0, 3), [1, 2, 3]);
+  assert.deepEqual(result.games.map(game => game.index), [0, 1, 2, 3, 4]);
+  assert.deepEqual(result.samples.map(sample => sample.gameId), result.games.map(game => game.gameId));
+  assert.equal(result.summary.games, 5);
+});
+
+test('per-game exploration, start rotation and samples are identical across concurrency settings', async () => {
+  const positions = [{ id: 'a', position: createPosition() }, { id: 'b', position: createPosition() }];
+  const options = { ...limits, positions, games: 4, maxPlies: 3, exploration: 1, explorationPlies: 3, seed: 17,
+    metadata: { runId: 'deterministic' },
+    analyzePosition: async position => { await nextTurn(); return firstLegal(position); },
+  };
+  const serial = await generateSelfPlayGames({ ...options, gameConcurrency: 1 });
+  const parallel = await generateSelfPlayGames({ ...options, gameConcurrency: 3 });
+  const normalize = result => ({ ...result, games: result.games.map(game => ({ ...game,
+    limits: { ...game.limits, gameConcurrency: 1 },
+  })) });
+  assert.deepEqual(normalize(parallel), normalize(serial));
+  assert.deepEqual(parallel.games.map(game => game.startId), ['b', 'a', 'b', 'a']);
+  assert.deepEqual(parallel.games.map(game => game.gameId), ['deterministic:17:1', 'deterministic:17:2', 'deterministic:17:3', 'deterministic:17:4']);
+  for (const game of parallel.games) replay(game);
+});
+
+test('parallel cancellation stops assigning games and drains started lanes and streaming callbacks', async () => {
+  const allStarted = deferred();
+  let started = 0, active = 0, stoppedCallbacks = 0, writes = 0, stop = false;
+  const generation = generateSelfPlayGames({ ...limits, positions: starts(), games: 10, gameConcurrency: 3,
+    shouldStop: () => stop,
+    analyzePosition: async (position, { shouldStop }) => {
+      active++;
+      if (++started === 3) allStarted.resolve();
+      try {
+        await allStarted.promise;
+        while (!shouldStop()) await nextTurn();
+        stoppedCallbacks++;
+        const error = new Error('Stopped'); error.name = 'AbortError'; throw error;
+      } finally { active--; }
+    },
+    onGame: async () => { await nextTurn(); writes++; },
+  });
+  await allStarted.promise;
+  stop = true;
+  const result = await generation;
+  assert.equal(started, 3);
+  assert.equal(stoppedCallbacks, 3);
+  assert.equal(active, 0);
+  assert.equal(writes, 3);
+  assert.equal(result.summary.cancelled, true);
+  assert.deepEqual(result.games.map(game => game.index), [0, 1, 2]);
+  assert(result.games.every(game => game.reason === 'cancelled' && game.valid));
+  await nextTurn();
+  assert.equal(started, 3);
+  assert.equal(writes, 3);
+});
+
+test('a streaming failure cancels parallel searches and drains lanes before rejecting', async () => {
+  const allStarted = deferred(), failure = new Error('Output unavailable');
+  let started = 0, active = 0, cancelled = 0, writes = 0;
+  const generation = generateSelfPlayGames({ ...limits, positions: starts(), games: 10, gameConcurrency: 3, maxPlies: 1,
+    analyzePosition: async (position, { shouldStop }) => {
+      const index = started++;
+      active++;
+      if (started === 3) allStarted.resolve();
+      try {
+        await allStarted.promise;
+        if (index === 0) return firstLegal(position);
+        while (!shouldStop()) await nextTurn();
+        cancelled++;
+        const error = new Error('Stopped'); error.name = 'AbortError'; throw error;
+      } finally { active--; }
+    },
+    onGame: async () => { writes++; await nextTurn(); throw failure; },
+  });
+  await assert.rejects(generation, error => error === failure);
+  assert.equal(started, 3);
+  assert.equal(cancelled, 2);
+  assert.equal(active, 0);
+  assert.equal(writes, 1);
+  await nextTurn();
+  assert.equal(started, 3);
+  assert.equal(writes, 1);
+});
 
 test('actual Transformer self-play certifies both White and Black wins and blends White-relative targets', async () => {
   const positions = mateStarts(), before = structuredClone(positions), seen = [];
@@ -245,7 +357,8 @@ test('stream callback is awaited and invalid options are rejected', async () => 
     onGame: async () => { await new Promise(resolve => setTimeout(resolve, 5)); streamed = true; },
   });
   assert.equal(streamed, true);
-  for (const bad of [{ games: 0 }, { exploration: 2 }, { outcomeWeight: NaN }, { maxNodes: -1 }, { seed: -2 }, { timeMs: 0 }]) {
+  for (const bad of [{ games: 0 }, { gameConcurrency: 0 }, { gameConcurrency: 9 }, { gameConcurrency: 1.5 },
+    { exploration: 2 }, { outcomeWeight: NaN }, { maxNodes: -1 }, { seed: -2 }, { timeMs: 0 }]) {
     await assert.rejects(generateSelfPlayGames({ ...limits, positions: starts(), analyzePosition: firstLegal, ...bad }), /Invalid/);
   }
   await assert.rejects(generateSelfPlayGames({ ...limits, positions: [], analyzePosition: firstLegal }), /positions/);
