@@ -35,7 +35,11 @@ async function main() {
   }
   const python = process.env.TRANSFORMER_PYTHON || DEFAULT_PYTHON;
   if (!existsSync(python)) throw new Error('Run npm run transformer:setup first (use -- --python PATH if needed).');
-  const scripts = { doctor: 'doctor.py', train: 'train.py', evaluate: 'evaluate.py', test: 'test_neural.py' };
+  if (command === 'test') {
+    await run(python, ['-m', 'unittest', 'discover', '-s', 'neural', '-t', '.', ...args]);
+    return;
+  }
+  const scripts = { doctor: 'doctor.py', train: 'train.py', evaluate: 'evaluate.py' };
   if (!scripts[command]) throw new Error('Usage: node scripts/transformer.js setup|doctor|train|evaluate|test [options]');
   await run(python, ['-u', path.join(PROJECT_ROOT, 'neural', scripts[command]), ...args]);
 }

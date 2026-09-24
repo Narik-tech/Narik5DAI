@@ -19,6 +19,11 @@ import random
 import sys
 import time
 
+try:
+    from .encoding import MAX_TOKENS
+except ImportError:
+    from encoding import MAX_TOKENS
+
 MAX_LINE_BYTES = 32 * 1024 * 1024
 
 
@@ -171,7 +176,8 @@ def main():
     parser.add_argument("--heads", type=int, default=4)
     parser.add_argument("--layers", type=int, default=4)
     parser.add_argument("--feedforward", type=int, default=384)
-    parser.add_argument("--max-tokens", type=int, default=512)
+    parser.add_argument("--max-tokens", type=int, default=MAX_TOKENS,
+                        help=f"input token budget, including resumed training (16–{MAX_TOKENS}; default {MAX_TOKENS})")
     parser.add_argument("--dropout", type=float, default=0.1)
     args = parser.parse_args()
     try:
@@ -202,7 +208,7 @@ def main():
         device = choose_device(args.device)
         checkpoint = {}
         if args.resume:
-            model, checkpoint = load_checkpoint(args.resume, device)
+            model, checkpoint = load_checkpoint(args.resume, device, max_tokens=args.max_tokens)
         else:
             config = ModelConfig(args.width, args.heads, args.layers, args.feedforward, args.max_tokens, args.dropout)
             model = TransformerValue(config).to(device)
@@ -236,8 +242,9 @@ def main():
             print(json.dumps({"event": "validation_baseline", "step": previous_steps,
                               "validation": baseline_validation, "eligibleForBest": bool(previous_steps)}), flush=True)
             if args.best_output and previous_steps:
-                # Keep original training provenance for an unchanged baseline.
-                write_checkpoint(args.best_output, {**checkpoint, "selection": selection})
+                # Keep original training provenance while recording the context
+                # budget used to evaluate this unchanged baseline's weights.
+                write_checkpoint(args.best_output, {**checkpoint, "config": asdict(model.config), "selection": selection})
         while updates < args.steps:
             attempts += 1
             if attempts > args.steps * 10:

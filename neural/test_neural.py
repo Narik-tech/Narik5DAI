@@ -16,7 +16,7 @@ ROOT = Path(__file__).resolve().parents[1]
 if __package__ in (None, ""):
     sys.path.insert(0, str(ROOT))
 
-from neural.encoding import ENCODING_VERSION, encode_position
+from neural.encoding import ENCODING_VERSION, MAX_TOKENS, encode_position
 
 
 def position():
@@ -38,25 +38,54 @@ class EncodingTests(unittest.TestCase):
         changed["action"] = 2
         self.assertNotEqual(encode_position(changed).global_features, encoded.global_features)
 
-    def test_frontier_preserved_and_history_sampling_deterministic(self):
+    def test_nearest_history_boards_preserved_without_partial_boards(self):
         source = position()
         source["board"][0] = [copy.deepcopy(source["board"][0][1]) for _ in range(30)]
         encoded = encode_position(source, 16)
-        self.assertEqual(encoded.context["tokens"], 16)
+        self.assertEqual(encoded.context["tokens"], 13)
         self.assertTrue(encoded.context["truncated"])
         self.assertFalse(encoded.context["frontierTruncated"])
         self.assertEqual(sum(c[4] == 1 for c in encoded.categories), 4)
         self.assertEqual(encoded, encode_position(source, 16))
         historic_times = {coordinate[1] for category, coordinate in zip(encoded.categories[1:], encoded.coordinates[1:]) if not category[4]}
-        self.assertIn(0, historic_times)
-        self.assertIn(28, historic_times)
+        self.assertEqual(historic_times, {27, 28})
+        for time in (27, 28, 29):
+            self.assertEqual(sum(coordinate[1] == time for coordinate in encoded.coordinates[1:]), 4)
 
-    def test_frontier_overflow_disclosed_and_royals_prioritized(self):
+    def test_frontier_overflow_drops_whole_board_and_is_disclosed(self):
         squares = [[2] * 8 for _ in range(8)]
         squares[0][0], squares[7][7] = 12, 11
         encoded = encode_position({"board": [[squares]], "action": 0}, 16)
+        self.assertEqual(encoded.context["tokens"], 1)
+        self.assertEqual(encoded.context["totalTokens"], 66)
+        self.assertTrue(encoded.context["truncated"])
         self.assertTrue(encoded.context["frontierTruncated"])
-        self.assertEqual({11, 12} & {category[1] for category in encoded.categories}, {11, 12})
+        self.assertEqual(encoded.global_features[7], 1)
+
+    def test_default_context_retains_exactly_4096_tokens_then_drops_farthest_board(self):
+        # Each complete board costs three tokens: its marker and two kings.
+        source = {"board": [[[[12, 11]] for _ in range(1365)]], "action": 0}
+        original = copy.deepcopy(source)
+        encoded = encode_position(source)
+        self.assertEqual(encoded.context["tokens"], MAX_TOKENS)
+        self.assertFalse(encoded.context["truncated"])
+        self.assertEqual(source, original)
+
+        source["board"][0].append([[12, 11]])
+        source["action"] = 1
+        encoded = encode_position(source)
+        self.assertEqual(encoded.context["tokens"], MAX_TOKENS)
+        self.assertEqual(encoded.context["totalTokens"], MAX_TOKENS + 3)
+        self.assertTrue(encoded.context["truncated"])
+        self.assertFalse(encoded.context["frontierTruncated"])
+        self.assertEqual({coordinate[1] for coordinate in encoded.coordinates[1:]}, set(range(1, 1366)))
+        self.assertEqual(encoded.global_features[5], MAX_TOKENS / (MAX_TOKENS + 3))
+
+    def test_token_budget_bounds(self):
+        self.assertEqual(encode_position(position(), MAX_TOKENS), encode_position(position()))
+        for invalid in (15, 4097, True, 4096.0):
+            with self.subTest(max_tokens=invalid), self.assertRaises(ValueError):
+                encode_position(position(), invalid)
 
     def test_even_timelines_use_upstream_coordinates(self):
         source = position()

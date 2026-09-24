@@ -8,9 +8,9 @@ import torch
 from torch import nn
 
 try:
-    from .encoding import COORDINATE_FEATURES, ENCODING_VERSION, GLOBAL_FEATURES, encode_position
+    from .encoding import COORDINATE_FEATURES, ENCODING_VERSION, GLOBAL_FEATURES, MAX_TOKENS, encode_position
 except ImportError:
-    from encoding import COORDINATE_FEATURES, ENCODING_VERSION, GLOBAL_FEATURES, encode_position
+    from encoding import COORDINATE_FEATURES, ENCODING_VERSION, GLOBAL_FEATURES, MAX_TOKENS, encode_position
 
 ARCHITECTURE = "5d-transformer-value-v1"
 
@@ -21,7 +21,7 @@ class ModelConfig:
     heads: int = 4
     layers: int = 4
     feedforward: int = 384
-    max_tokens: int = 512
+    max_tokens: int = MAX_TOKENS
     dropout: float = 0.1
 
     def __post_init__(self):
@@ -32,8 +32,8 @@ class ModelConfig:
             raise ValueError("width must be 32–256 and divisible by heads (1, 2, 4, or 8)")
         if not 1 <= self.layers <= 8 or not self.width <= self.feedforward <= 1024:
             raise ValueError("layers must be 1–8 and feedforward width must be width–1024")
-        if not 16 <= self.max_tokens <= 1024 or not 0 <= self.dropout < 1:
-            raise ValueError("max_tokens must be 16–1024 and dropout must be in [0,1)")
+        if not 16 <= self.max_tokens <= MAX_TOKENS or not 0 <= self.dropout < 1:
+            raise ValueError(f"max_tokens must be 16–{MAX_TOKENS} and dropout must be in [0,1)")
 
 
 class TransformerValue(nn.Module):
@@ -90,7 +90,13 @@ def choose_device(requested="auto"):
     return torch.device("cuda" if requested != "cpu" and torch.cuda.is_available() else "cpu")
 
 
-def load_checkpoint(path, device):
+def load_checkpoint(path, device, max_tokens=MAX_TOKENS):
+    """Load weights with the current context budget without modifying the file.
+
+    Context length does not affect parameter shapes. Checkpoints trained with an
+    older budget therefore use the current runtime limit, while resumed training
+    can explicitly request a smaller budget.
+    """
     path = Path(path)
     if not path.is_file():
         raise FileNotFoundError(f"Transformer checkpoint not found: {path}. Generate training data and run neural/train.py; see docs/transformer.md.")
@@ -101,7 +107,8 @@ def load_checkpoint(path, device):
         raise ValueError("checkpoint encoding version is incompatible with this engine")
     if type(checkpoint.get("trainedSteps")) is not int or checkpoint["trainedSteps"] < 1:
         raise ValueError("checkpoint has no completed training steps; random weights cannot be used as an engine")
-    model = TransformerValue(ModelConfig(**checkpoint["config"]))
+    config = ModelConfig(**{**checkpoint["config"], "max_tokens": max_tokens})
+    model = TransformerValue(config)
     model.load_state_dict(checkpoint["state_dict"], strict=True)
     if any(not torch.isfinite(parameter).all().item() for parameter in model.parameters()):
         raise ValueError("checkpoint contains nonfinite weights")

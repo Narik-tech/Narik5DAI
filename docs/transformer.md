@@ -111,7 +111,7 @@ mate. Neural values alone never certify terminal status or playing strength.
 | Hidden width / attention heads | 128 / 4 |
 | Feed-forward width | 384, GELU |
 | Parameters | 694,017 |
-| Context | At most 512 tokens including CLS |
+| Context | At most 4,096 tokens including CLS |
 | Training | AdamW, batch 16, CUDA float16 AMP, gradient norm clipped to 1 |
 | Prediction | CLS value head, scalar white-relative score |
 
@@ -125,12 +125,21 @@ promotion pieces, and context coverage. Empty board markers preserve board
 existence even without pieces. In even-timeline variants, the two zero-labelled
 timelines receive adjacent distinct coordinates, matching rule-engine movement.
 
-Selection first retains frontier board markers, frontier royals, and other
-frontier pieces; remaining capacity samples historical tokens at deterministic
-even intervals spanning oldest to newest history. Positions within the budget
-retain every token. Very large frontiers can themselves overflow. Every
-prediction reports token counts, `truncated`, and `frontierTruncated`. Discarded
-history can hide relevant tactics from evaluation; legal search still uses it.
+Positions within the budget retain every token. On overflow, selection drops
+whole boards furthest from the nearest playable board first. Playable boards
+are timeline frontiers whose side to move matches the action, including future
+and inactive timelines. Distance is the sum of signed timeline separation and
+half-turn separation divided by two. If no frontier matches the mover, all
+frontiers serve as distance anchors. Ties prefer newer boards, then lower signed
+timeline coordinates, so selection is deterministic.
+
+Selected boards keep their marker and every occupied square. Selection stops
+when the next closest board cannot fit; unused capacity does not admit a farther,
+smaller board. Very small custom budgets may retain only CLS if no closest board
+fits. Every prediction reports token counts, `truncated`, and
+`frontierTruncated` (whether any latest board was omitted). Discarded context can
+hide relevant tactics from evaluation; legal search still uses full history.
+Training and inference share this selection policy.
 
 On this workstation's **NVIDIA GeForce RTX 3060, 12 GiB**, PyTorch
 2.14.0+cu126 completed three full-length training updates at batch 16 × 512
@@ -144,7 +153,8 @@ npm run transformer:doctor -- --benchmark --device cuda
 ```
 
 The benchmark creates no checkpoint. It exercises forward/backward passes,
-mixed precision, and optimizer state at the full token limit. Model data and
+mixed precision, and optimizer state at a fixed 512-token workload; these earlier
+measurements do not describe the current 4,096-token maximum. Model data and
 optimizer memory are small relative to this GPU's capacity; sparse encoding and
 JavaScript legal move generation may dominate end-to-end search time.
 
@@ -233,10 +243,14 @@ peak CUDA allocator memory. An interrupted run can resume from the last saved
 checkpoint.
 
 Use `--batch-size 8` if available memory is constrained by other applications.
-`--width`, `--heads`, `--layers`, `--feedforward`, and `--max-tokens` configure
-new models, are saved with the checkpoint, and cannot change an existing model
-via resume. The service reads the saved configuration. Run training during a
-separate period from latency-sensitive analysis for predictable GPU usage.
+`--width`, `--heads`, `--layers`, and `--feedforward` configure new models and
+cannot change an existing model via resume. `--max-tokens` accepts 16–4,096 and
+defaults to 4,096 for both new and resumed training. Training saves the effective
+budget with the checkpoint. Inference and evaluation load existing weights with
+the current 4,096-token budget, including older checkpoints trained with smaller
+contexts; loading does not rewrite those files. Context length does not change
+parameter shapes, so no weight conversion or retraining is required. Run training
+during a separate period from latency-sensitive analysis for predictable GPU usage.
 
 ## Validation and worker protocol
 
