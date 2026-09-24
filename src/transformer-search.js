@@ -1,4 +1,4 @@
-import { createPositionKeyCache, generateActions, inCheck, raw } from './rules.js';
+import { applyMove, canSubmit, createPositionKeyCache, generateActions, generateActionsAsync, inCheck, raw } from './rules.js';
 
 export const MATE_SCORE = 100_000;
 const MATE_THRESHOLD = MATE_SCORE - 1000;
@@ -8,9 +8,10 @@ const finite = (value, fallback, min, max) => Number.isFinite(Number(value))
 class SearchInterrupted extends Error {}
 
 /**
- * Neural value search over complete legal submissions. The first candidateLimit
- * actions at each position are scored in GPU-friendly batches, then searched
- * in neural-value order with alpha-beta. Every generated candidate is eligible
+ * Neural value search over complete legal submissions. Distinct partial-move
+ * successors are scored in batches to assemble the strongest components first,
+ * before the full-turn candidate cap. Complete candidates are then searched
+ * in neural-value order with alpha-beta. Every admitted candidate is eligible
  * for deepening; only a search bound can cut off the remaining alternatives.
  * Candidate caps still make this selective, not exhaustive full-rule minimax.
  * Values are always White centipawns.
@@ -24,9 +25,8 @@ export async function analyze(position, options = {}) {
   const maxNodes = Math.floor(finite(options.maxNodes, 200_000, 0, 1_000_000_000));
   const candidateLimit = Math.floor(finite(options.candidateLimit, 64, 1, 256));
   // The same position must see the same candidate set when it becomes the
-  // root. A smaller default for replies excluded every opening knight move
-  // for Black (the first 16 generated actions are pawn moves). Advanced callers
-  // may still opt into a different reply cap, accepting that asymmetry.
+  // root. Advanced callers may still opt into a different reply cap, accepting
+  // that asymmetry even though both caps now follow neural component ordering.
   const innerCandidateLimit = Math.floor(finite(options.innerCandidateLimit, candidateLimit, 1, 256));
   const maxCachedPositions = Math.floor(finite(options.maxCachedPositions, 128, 0, 512));
   const deadline = started + timeMs, rootSign = sign(position);
@@ -56,33 +56,72 @@ export async function analyze(position, options = {}) {
       lastProgress = performance.now(); options.onProgress(snapshot());
     }
   }
-  function* iterator(pos) {
+  async function* iterator(pos, ply) {
     const generated = new Set();
+    // Scores belong to a resulting history, not a move's coordinates: playing
+    // the same temporal move after another component can create a new branch.
+    // Keep this cache only while assembling this position's candidate turns.
+    const partials = new Map();
     let hasOptionalMoves = false;
     const generationOptions = { tick, keyPosition, skipOptionalSpatial: false };
-    function orderMoves(current, moves, requiredOnly = false) {
+    async function orderMoves(current, moves, requiredOnly = false) {
       // Time travel can change the present during a complete turn. Both
       // future active boards and inactive boards are optional source boards.
       const present = new Set(raw.boardFuncs.present(current.board, current.action));
-      const required = [], optional = [];
-      for (const move of moves) (present.has(move[0][0]) ? required : optional).push(move);
-      hasOptionalMoves ||= optional.length > 0;
-      return requiredOnly ? required : required.concat(optional);
+      const pending = [], ordered = [];
+      for (const [index, move] of moves.entries()) {
+        tick();
+        const partial = applyMove(current, move), complete = canSubmit(partial);
+        // A partial turn retains the mover; only the rules engine may decide
+        // that a successor can also be evaluated as a completed submission.
+        const successor = complete ? { ...partial, action: partial.action + 1 } : partial;
+        const key = keyPosition(successor);
+        let entry = partials.get(key);
+        if (!entry) {
+          const terminal = complete ? probeTerminal(successor, ply + 1) : null;
+          entry = { position: successor, terminal, complete };
+          partials.set(key, entry);
+          if (!terminal) pending.push(successor);
+        }
+        const required = present.has(move[0][0]);
+        hasOptionalMoves ||= !required;
+        ordered.push({ move, entry, required, index });
+      }
+      // Score every distinct alternative before selecting components, even
+      // when the full-turn cap is one. Reuse scores across commuting prefixes
+      // and the required-only/unrestricted passes, within service batch limits.
+      for (let offset = 0; offset < pending.length; offset += 128) {
+        await infer(pending.slice(offset, offset + 128));
+      }
+      for (const { entry } of ordered) {
+        entry.value ??= entry.terminal ? -entry.terminal.score : valueCache.get(entry.position) * sign(current);
+      }
+      return ordered.filter(item => !requiredOnly || item.required)
+        .sort((a, b) => Number(b.required) - Number(a.required) || b.entry.value - a.entry.value || a.index - b.index)
+        .map(item => item.move);
+    }
+    function reuseEvaluation(candidate) {
+      const entry = partials.get(keyPosition(candidate.position));
+      if (entry?.complete) {
+        terminalCache.set(candidate.position, Boolean(entry.terminal));
+        if (!entry.terminal) valueCache.set(candidate.position, valueCache.get(entry.position));
+      }
+      return candidate;
     }
     // Sorting component moves alone still lets depth-first optional extensions
     // fill the candidate cap before the next required-board alternative.
     // Generate every required-only submission before considering those turns.
-    for (const candidate of generateActions(pos, { ...generationOptions,
+    for await (const candidate of generateActionsAsync(pos, { ...generationOptions,
       orderMoves: (current, moves) => orderMoves(current, moves, true),
     })) {
       generated.add(keyPosition(candidate.position));
-      yield candidate;
+      yield reuseEvaluation(candidate);
     }
     if (!hasOptionalMoves) return;
     // Replay unrestricted generation to preserve optional-before-required
     // sequences whose ordering changes a temporal arrival into a branch.
-    for (const candidate of generateActions(pos, { ...generationOptions, orderMoves })) {
-      if (!generated.has(keyPosition(candidate.position))) yield candidate;
+    for await (const candidate of generateActionsAsync(pos, { ...generationOptions, orderMoves })) {
+      if (!generated.has(keyPosition(candidate.position))) yield reuseEvaluation(candidate);
     }
   }
   function terminalValue(pos, ply) {
@@ -99,15 +138,25 @@ export async function analyze(position, options = {}) {
     }
     return terminalCache.get(pos) ? terminalValue(pos, ply) : null;
   }
-  function candidates(pos, ply) {
+  async function candidates(pos, ply) {
     if (ply === 0 && rootCandidates) return rootCandidates;
     if (candidateCache.has(pos)) return candidateCache.get(pos);
     const limit = ply === 0 ? candidateLimit : innerCandidateLimit;
-    const legal = iterator(pos), items = [];
+    // Preserve a legal fallback before the first awaited component evaluation.
+    // This unrestricted probe also proves root terminals without model calls.
+    if (ply === 0 && !terminalCache.has(pos)) {
+      const fallback = generateActions(pos, { tick, keyPosition, skipOptionalSpatial: false });
+      try {
+        const first = fallback.next();
+        terminalCache.set(pos, first.done);
+        if (!first.done) { bestAction = first.value.moves; pv = [bestAction]; }
+      } finally { fallback.return?.(); }
+    }
+    const legal = iterator(pos, ply), items = [];
     let exhaustive = false;
     try {
-      while (items.length < limit) {
-        const next = legal.next();
+      while (items.length < limit && !terminalCache.get(pos)) {
+        const next = await legal.next();
         if (next.done) { exhaustive = true; break; }
         items.push(next.value);
         if (ply === 0 && bestAction === null) {
@@ -115,7 +164,8 @@ export async function analyze(position, options = {}) {
           bestAction = next.value.moves; pv = [bestAction];
         }
       }
-    } finally { legal.return?.(); }
+      if (terminalCache.get(pos)) exhaustive = true;
+    } finally { await legal.return?.(); }
     if (!exhaustive) candidateCaps++;
     terminalCache.set(pos, exhaustive && !items.length);
     const result = { items, exhaustive };
@@ -175,7 +225,7 @@ export async function analyze(position, options = {}) {
   async function search(pos, remaining, ply, alpha = -Infinity, beta = Infinity) {
     check(); tick('search');
     selectiveDepth = Math.max(selectiveDepth, ply);
-    const generated = candidates(pos, ply);
+    const generated = await candidates(pos, ply);
     if (!generated.items.length) return terminalValue(pos, ply);
     const ranked = await rank(generated.items, ply + 1, sign(pos));
     // Reuse the last iteration's best turn for ordering only. It cannot change

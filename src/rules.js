@@ -371,7 +371,44 @@ export function validateAction(position, moves) {
  * remains exhaustive. Recompute the present after every component move because
  * time travel can change which timelines are active and required.
  */
-export function* generateActions(position, { tick = () => {}, orderMoves = (_position, moves) => moves, preferredAction = null, pruneUnsafe = true, tacticalOnly = false, cacheMoves = true, keyPosition = positionKey, skipOptionalSpatial = false, onSkipOptionalSpatial } = {}) {
+export function* generateActions(position, options = {}) {
+  const steps = generateActionSteps(position, options);
+  const orderMoves = options.orderMoves ?? ((_position, moves) => moves);
+  try {
+    let step = steps.next();
+    while (!step.done) {
+      if (step.value.candidate) {
+        yield step.value.candidate;
+        step = steps.next();
+      } else {
+        const { current, moves } = step.value;
+        step = steps.next(orderMoves(current, moves));
+      }
+    }
+  } finally { steps.return?.(); }
+}
+
+/** The same legal traversal, with an awaitable component-move ordering hook. */
+export async function* generateActionsAsync(position, options = {}) {
+  const steps = generateActionSteps(position, options);
+  const orderMoves = options.orderMoves ?? ((_position, moves) => moves);
+  try {
+    let step = steps.next();
+    while (!step.done) {
+      if (step.value.candidate) {
+        yield step.value.candidate;
+        step = steps.next();
+      } else {
+        const { current, moves } = step.value;
+        step = steps.next(await orderMoves(current, moves));
+      }
+    }
+  } finally { steps.return?.(); }
+}
+
+// Both drivers share every legality, deduplication and pruning decision. The
+// traversal pauses only to request move ordering or expose a legal submission.
+function* generateActionSteps(position, { tick = () => {}, preferredAction = null, pruneUnsafe = true, tacticalOnly = false, cacheMoves = true, keyPosition = positionKey, skipOptionalSpatial = false, onSkipOptionalSpatial } = {}) {
   const visited = new Set();
   const path = [];
   let initialMoves, preferredKey;
@@ -404,7 +441,7 @@ export function* generateActions(position, { tick = () => {}, orderMoves = (_pos
     }
     if (legal && (!tacticalOnly || tactical) && canSubmit(current)) {
       preferredKey = keyPosition(current);
-      yield { moves, position: { ...current, action: current.action + 1 } };
+      yield { candidate: { moves, position: { ...current, action: current.action + 1 } } };
     }
   }
   function* visit(current, hasTacticalMove = false) {
@@ -421,7 +458,7 @@ export function* generateActions(position, { tick = () => {}, orderMoves = (_pos
     const unsafe = attackedByNextPlayer(current);
     if (pruneUnsafe && unsafe) return;
     if (stateKey !== preferredKey && (!tacticalOnly || hasTacticalMove) && !unsafe && raw.boardFuncs.present(current.board, current.action).length === 0) {
-      yield { moves: path.slice(), position: { ...current, action: current.action + 1 } };
+      yield { candidate: { moves: path.slice(), position: { ...current, action: current.action + 1 } } };
     }
     // Every move consumes existing mover-color sources and creates only
     // opponent-color boards. Geometry, unmoved flags, and en-passant history
@@ -440,7 +477,8 @@ export function* generateActions(position, { tick = () => {}, orderMoves = (_pos
       const active = raw.boardFuncs.active(current.board);
       if (!availableMoves(current, false).some(move => !active.includes(move[0][0]) && isTacticalMove(current, move))) return;
     }
-    for (const move of orderMoves(current, moves)) {
+    const orderedMoves = yield { current, moves };
+    for (const move of orderedMoves) {
       tick();
       path.push(move);
       yield* visit(applyMove(current, move), tacticalOnly && (hasTacticalMove || isTacticalMove(current, move)));

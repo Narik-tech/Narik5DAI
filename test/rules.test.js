@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { GameSession } from '../src/session.js';
 import {
   raw, createPosition, pseudoMoves, applyMove, canSubmit, submitPosition,
-  inCheck, positionKey, formatMove, formatAction, parseMove, validateAction, generateActions,
+  inCheck, positionKey, formatMove, formatAction, parseMove, validateAction, generateActions, generateActionsAsync,
   normalizePGN,
 } from '../src/rules.js';
 
@@ -18,6 +18,69 @@ test('standard opening enumerates twenty complete legal turns', () => {
   assert.equal(actions.length, 20);
   assert(actions.every(action => action.moves.length === 1 && action.position.action === 1));
   for (const action of actions) assert.deepEqual(validateAction(start, action.moves), action.position);
+});
+
+test('awaited component ordering preserves the synchronous legal action traversal', async () => {
+  const checked = smallBoard(); checked[3][0] = 7;
+  const first = smallBoard(); first[1][1] = 4;
+  const positions = [
+    createPosition(),
+    position([[checked], null, [structuredClone(checked)]]),
+    position([[first], null, [smallBoard(), smallBoard(), smallBoard()]]),
+  ];
+  for (const start of positions) {
+    const before = positionKey(start);
+    const reverse = (_current, moves) => moves.toReversed();
+    const expected = [...generateActions(start, { orderMoves: reverse })];
+    let calls = 0;
+    const actual = [];
+    for await (const candidate of generateActionsAsync(start, {
+      orderMoves: async (current, moves) => {
+        await Promise.resolve();
+        calls++;
+        assert.equal(current.action, start.action, 'partial turns retain the mover');
+        return reverse(current, moves);
+      },
+    })) actual.push(candidate);
+    assert(calls > 0);
+    assert.deepEqual(actual, expected);
+    assert.equal(new Set(actual.map(candidate => positionKey(candidate.position))).size, actual.length);
+    for (const candidate of actual) assert.deepEqual(validateAction(start, candidate.moves), candidate.position);
+    assert.equal(positionKey(start), before);
+  }
+});
+
+test('async action generation preserves optional-first temporal branches and preferred turns', async () => {
+  const first = smallBoard(); first[1][1] = 4;
+  const start = position([[first], null, [smallBoard(), smallBoard(), smallBoard()]]);
+  const advance = parseMove(start, [[2, 2, 0, 0], [2, 2, 0, 1]]);
+  const travel = parseMove(start, [[0, 0, 1, 1], [2, 2, 1, 1]]);
+  const preferredAction = [advance, travel];
+  const expected = validateAction(start, preferredAction);
+  const actions = [];
+  for await (const candidate of generateActionsAsync(start, {
+    preferredAction, orderMoves: async (_current, moves) => moves.toReversed(),
+  })) actions.push(candidate);
+  assert.deepEqual(actions[0].moves, preferredAction);
+  assert.deepEqual(actions[0].position, expected);
+  assert(expected.board[4], 'the optional spatial advance makes the arrival branch');
+  const keys = candidates => candidates.map(candidate => positionKey(candidate.position)).sort();
+  assert.deepEqual(keys(actions), keys([...generateActions(start)]));
+  assert.equal(new Set(keys(actions)).size, actions.length);
+});
+
+test('async ordering failures and cancellation propagate without a terminal result', async () => {
+  const collect = async options => {
+    const result = [];
+    for await (const candidate of generateActionsAsync(createPosition(), options)) result.push(candidate);
+    return result;
+  };
+  await assert.rejects(collect({ orderMoves: async () => { throw new Error('inference failed'); } }), /inference failed/);
+  let ticks = 0;
+  await assert.rejects(collect({
+    orderMoves: async (_current, moves) => moves,
+    tick() { if (++ticks === 5) throw new Error('cancelled'); },
+  }), /cancelled/);
 });
 
 test('move application preserves history and shares immutable old boards', () => {
