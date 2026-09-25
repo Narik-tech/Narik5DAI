@@ -138,9 +138,12 @@ export function createApp({ transformerRuntime = new TransformerRuntime(), train
         case '/api/analyze': {
           const engine = body.engine ?? 'classical';
           if (!['classical', 'transformer'].includes(engine)) throw new Error('Unknown engine. Choose classical or transformer.');
+          const timeMs = numericOption(body.timeMs, 3000, 0, 120000, 'Think time');
+          if (timeMs > 0 && timeMs < 50) throw new Error('Think time must be 0 (infinite) or an integer between 50 and 120000.');
           const options = {
             engine,
-            timeMs: numericOption(body.timeMs, 3000, 50, 120000, 'Think time'),
+            timeMs,
+            unlimitedTime: timeMs === 0,
             maxDepth: numericOption(body.maxDepth, 8, engine === 'transformer' ? 0 : 1, engine === 'transformer' ? 64 : 16, 'Depth'),
             maxNodes: numericOption(body.maxNodes, 2000000, 1, 1000000000, 'Node budget'),
             threads: numericOption(body.threads, 1, 1, 16, 'Search threads'),
@@ -169,8 +172,8 @@ export function createApp({ transformerRuntime = new TransformerRuntime(), train
           });
           job.worker = worker;
           jobs.set(job.id, job);
-          // Guard non-interruptible upstream move generation as well as our cooperative timer.
-          const hardDeadline = setTimeout(() => {
+          // Finite searches also guard non-interruptible upstream move generation.
+          const hardDeadline = options.unlimitedTime ? undefined : setTimeout(() => {
             if (job.status !== 'running') return;
             job.result = job.progress ? { ...job.progress, stoppedReason: 'hard-time-limit' } : undefined;
             job.status = job.result?.bestAction ? 'done' : 'cancelled';
@@ -178,7 +181,7 @@ export function createApp({ transformerRuntime = new TransformerRuntime(), train
             void worker.terminate();
           }, options.timeMs + 5000);
           job.deadline = hardDeadline;
-          hardDeadline.unref();
+          hardDeadline?.unref();
           worker.on('message', message => {
             if (job.status !== 'running') return;
             if (message.type === 'evaluate') { void forwardInference(worker, transformerRuntime, message); return; }

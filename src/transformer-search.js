@@ -36,7 +36,7 @@ export async function analyze(position, options = {}) {
   // that asymmetry even though both caps now follow neural component ordering.
   const innerCandidateLimit = Math.floor(finite(options.innerCandidateLimit, candidateLimit, 1, 256));
   const maxCachedPositions = Math.floor(finite(options.maxCachedPositions, 128, 0, 512));
-  const deadline = started + timeMs, rootSign = sign(position);
+  const deadline = options.unlimitedTime === true ? Infinity : started + timeMs, rootSign = sign(position);
   const keyPosition = createPositionKeyCache();
   const candidateCache = new Map(), terminalCache = new WeakMap(), valueCache = new WeakMap();
   const levels = [];

@@ -92,6 +92,11 @@ test('analysis forwards node and cache memory budgets to the worker, including d
 
 test('analysis rejects out-of-range and malformed resource budgets', async t => {
   const { request } = await fixture(t);
+  for (const timeMs of [-1, 1, 49, 0.5, 120001, null, true, '', []]) {
+    const response = await request('/api/analyze', { timeMs });
+    assert.equal(response.status, 400, `Accepted timeMs ${JSON.stringify(timeMs)}`);
+    assert.match(response.data.error, /Think time must be/);
+  }
   for (const maxNodes of [0, -1, 1.5, 1000000001, null, true, '', []]) {
     const response = await request('/api/analyze', { maxNodes });
     assert.equal(response.status, 400, `Accepted maxNodes ${JSON.stringify(maxNodes)}`);
@@ -130,10 +135,11 @@ test('parallel analysis accepts a thread count and keeps node and cache limits g
   assert.ok(job.result.cacheMemoryBytes <= 16 * 1024 * 1024);
 });
 
-test('stopping a long search returns an interrupted result and preserves the position', async t => {
+for (const timeMs of [60000, 0]) test(`stopping a search with think time ${timeMs} preserves the position`, async t => {
   const { request } = await fixture(t);
   const initial = (await request('/api/game')).data;
-  const created = await request('/api/analyze', { timeMs: 60000, maxDepth: 16 });
+  const created = await request('/api/analyze', { timeMs, maxDepth: 16 });
+  assert.equal(created.status, 202, created.data.error);
   await request(`/api/analysis/${created.data.jobId}/stop`, {});
   let job;
   const deadline = Date.now() + 3000;
@@ -147,6 +153,27 @@ test('stopping a long search returns an interrupted result and preserves the pos
   const unchanged = (await request('/api/game')).data;
   assert.equal(unchanged.revision, initial.revision);
   assert.deepEqual(unchanged.position, initial.position);
+});
+
+test('zero think time searches without a deadline and still respects node limits', async t => {
+  const { request } = await fixture(t);
+  for (const threads of [1, 2]) {
+    const created = await request('/api/analyze', {
+      timeMs: 0, threads, maxDepth: 16, maxNodes: 1000, quiescenceDepth: 0,
+    });
+    assert.equal(created.status, 202, created.data.error);
+    let job;
+    const deadline = Date.now() + 8000;
+    do {
+      await delay(20);
+      job = (await request(`/api/analysis/${created.data.jobId}`)).data;
+    } while (job.status === 'running' && Date.now() < deadline);
+    assert.equal(job.status, 'done', job.error);
+    assert.equal(job.result.limits.timeMs, 0);
+    assert.equal(job.result.stoppedReason, 'nodes');
+    assert.equal(job.result.nodes, 1000);
+    assert.ok(Array.isArray(job.result.bestAction));
+  }
 });
 
 test('malformed imports leave the live position intact and bare FEN imports stay custom', async t => {

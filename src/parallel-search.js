@@ -59,13 +59,14 @@ export async function analyze(position, options = {}) {
     }));
   }
   const started = clock();
+  const unlimitedTime = options.unlimitedTime === true;
   const timeMs = finite(options.timeMs, 3000, 0, 3_600_000);
   const maxNodes = Math.floor(finite(options.maxNodes, 2_000_000, 0, 1_000_000_000));
   const cacheMemoryMb = finite(options.cacheMemoryMb, 128, 0, 4096);
   const maxTableEntries = Math.floor(finite(options.maxTableEntries, 100_000, 0, 1_000_000));
-  const deadline = started + timeMs;
+  const deadline = unlimitedTime ? Infinity : started + timeMs;
   const shared = new Int32Array(new SharedArrayBuffer(24));
-  const workerOptions = { timeMs, maxNodes, cacheMemoryMb: cacheMemoryMb / threads, maxTableEntries: Math.floor(maxTableEntries / threads) };
+  const workerOptions = { timeMs, unlimitedTime, maxNodes, cacheMemoryMb: cacheMemoryMb / threads, maxTableEntries: Math.floor(maxTableEntries / threads) };
   const pool = [];
   let threadsUsed = 1, callbackError;
   function cancelled() {
@@ -87,7 +88,7 @@ export async function analyze(position, options = {}) {
     return combined;
   }
   const session = createSearchSession(position, {
-    ...options, ...workerOptions, timeMs: Math.max(0, deadline - clock()),
+    ...options, ...workerOptions, timeMs: unlimitedTime ? timeMs : Math.max(0, deadline - clock()),
     shouldStop: cancelled, claimNode: kind => claimNode(shared, maxNodes, kind),
     onProgress: options.onProgress ? result => options.onProgress(aggregate(result)) : undefined,
   });

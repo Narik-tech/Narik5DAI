@@ -89,19 +89,19 @@ recomputed as continuation values propagate back through the tree. The search
 scheduler, dynamic-depth readiness check, and displayed depth tabs all use the
 same order, with a search-priority exception for short side-lines.
 
-Before normal scheduling, a move gets priority if its **Full continuation** has
-strictly fewer than half as many turns as the move immediately above it in the
-same depth's ranking. This counts the route from the root through the move and
-its best True continuations, exactly as shown in the UI. A 2-turn line following
-a 5-turn line qualifies; a 2-turn line following a 4-turn line does not.
+Before normal scheduling, a move gets priority if its **Full continuation** is
+at least two turns shorter than the move immediately above it in the same
+depth's ranking. This counts the route from the root through the move and its
+best True continuations, exactly as shown in the UI. A 3-turn line following a
+5-turn line qualifies; a 4-turn line following a 5-turn line does not.
 
 The scheduler searches inside the shorter move's branch using that branch's
 own ranked True prefixes. It can evaluate the move itself, generate its replies,
 or continue an already-expanded branch. Among qualifying moves, the strongest
 rank goes first, with shallower depth breaking ties. The condition is checked
-again after each action, so normal priority resumes when the gap closes. Lines
-ending in a proved terminal outcome, closed branches, and the active depth
-ceiling do not demand extra work. This exception changes search allocation;
+again after each action, so normal priority resumes when the gap is less than
+two turns. Lines ending in a proved terminal outcome, closed branches, and the
+active depth ceiling do not demand extra work. This exception changes search allocation;
 displayed rankings and the dynamic-depth threshold retain their usual order.
 
 Otherwise, the scheduler repeats the following while time and work remain:

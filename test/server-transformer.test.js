@@ -89,6 +89,34 @@ test('inference error is surfaced, never converted into a classical result', asy
   assert.equal(job.result, undefined);
 });
 
+test('zero think time survives the hard-deadline grace period and can be stopped', { timeout: 15000 }, async t => {
+  const runtime = mockRuntime();
+  let release, started;
+  const held = new Promise(resolve => { release = resolve; });
+  const evaluating = new Promise(resolve => { started = resolve; });
+  const evaluate = runtime.evaluate.bind(runtime);
+  runtime.evaluate = async positions => {
+    started();
+    await held;
+    return evaluate(positions);
+  };
+  t.after(() => release());
+  const { request, wait } = await fixture(t, runtime);
+  const created = await request('/api/analyze', { engine: 'transformer', timeMs: 0, maxDepth: 0 });
+  assert.equal(created.status, 202, created.data.error);
+  await evaluating;
+  // A zero budget must not schedule the server's usual budget + 5s watchdog.
+  await delay(5200);
+  const running = (await request(`/api/analysis/${created.data.jobId}`)).data;
+  assert.equal(running.status, 'running', running.error);
+  await request(`/api/analysis/${created.data.jobId}/stop`, {});
+  release();
+  const job = await wait(created.data.jobId);
+  assert.equal(job.status, 'done', job.error);
+  assert.equal(job.result.limits.timeMs, 0);
+  assert.equal(job.result.stoppedReason, 'cancelled');
+});
+
 test('transformer accepts dynamic and deeper depth while classical retains its depth range', async t => {
   const { request, wait } = await fixture(t, mockRuntime());
   for (const body of [

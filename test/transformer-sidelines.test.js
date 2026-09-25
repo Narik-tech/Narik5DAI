@@ -53,38 +53,55 @@ test('an underexplored Candidate is evaluated before extending the leading True 
   assert.deepEqual(graph.choose(), { kind: 'evaluate', node: candidate });
 });
 
-test('exactly half the predecessor continuation length keeps normal scheduling', () => {
+test('a two-turn gap gets priority, including exactly half the predecessor length', () => {
   const graph = tree();
-  const leader = graph.chain(graph.root, 4, 100);
-  graph.chain(graph.root, 2, 90);
-  assert.deepEqual(graph.choose(), { kind: 'expand', node: leader[3] });
+  graph.chain(graph.root, 4, 100);
+  const sideline = graph.chain(graph.root, 2, 90);
+  assert.deepEqual(graph.choose(), { kind: 'expand', node: sideline[1] });
 });
 
-test('later-depth comparisons count the complete root prefix as displayed', () => {
+test('a zero- or one-turn gap keeps normal scheduling', () => {
+  for (const leaderLength of [3, 4]) {
+    const graph = tree();
+    const leader = graph.chain(graph.root, leaderLength, 100);
+    graph.chain(graph.root, 3, 90);
+    assert.deepEqual(graph.choose(), { kind: 'expand', node: leader.at(-1) },
+      `a ${leaderLength - 3}-turn gap does not override the leading rank`);
+  }
+});
+
+test('long continuations get priority at a two-turn gap regardless of their length ratio', () => {
+  const graph = tree();
+  graph.chain(graph.root, 8, 100);
+  const sideline = graph.chain(graph.root, 6, 90);
+  assert.deepEqual(graph.choose(10), { kind: 'expand', node: sideline[5] });
+});
+
+test('later-depth comparisons apply the two-turn gap to full continuations', () => {
   const graph = tree();
   const parent = graph.add(graph.root, 100);
-  const leader = graph.chain(parent, 3, 100);
+  const leader = graph.chain(parent, 2, 100);
   const sideline = graph.add(parent, 110);
-  assert.deepEqual(graph.choose(), { kind: 'expand', node: leader[2] },
-    'depth-two lines of four and two turns are exactly half, despite their remaining lengths of three and one');
-  const deeper = graph.add(leader[2], 100);
+  assert.deepEqual(graph.choose(), { kind: 'expand', node: leader[1] },
+    'depth-two lines of three and two turns have only a one-turn gap');
+  const deeper = graph.add(leader[1], 100);
   assert.deepEqual(graph.choose(), { kind: 'expand', node: sideline },
-    'the same depth-two sideline takes priority once the preceding full continuation reaches five turns');
-  assert.equal(deeper.depth, 5);
+    'the same depth-two sideline takes priority once the preceding full continuation reaches four turns');
+  assert.equal(deeper.depth, 4);
 });
 
 test('each entry compares with the immediately preceding rank rather than always with rank one', () => {
   const graph = tree();
   const leader = graph.chain(graph.root, 7, 100);
   graph.chain(graph.root, 6, 90);
-  const third = graph.chain(graph.root, 3, 80);
+  const third = graph.chain(graph.root, 5, 80);
   assert.deepEqual(graph.choose(), { kind: 'expand', node: leader[6] },
-    'three turns is half of rank two, although it is less than half of rank one');
-  third[1].best = null;
-  third[1].children = null;
-  graph.levels[3] = graph.levels[3].filter(node => node !== third[2]);
-  assert.deepEqual(graph.choose(), { kind: 'expand', node: third[1] },
-    'a two-turn rank-three line gets priority against its six-turn predecessor');
+    'rank three trails rank two by only one turn, although it trails rank one by two');
+  third[3].best = null;
+  third[3].children = null;
+  graph.levels[5] = graph.levels[5].filter(node => node !== third[4]);
+  assert.deepEqual(graph.choose(), { kind: 'expand', node: third[3] },
+    'a four-turn rank-three line gets priority against its six-turn predecessor');
 });
 
 test('equally ranked deficits prefer the shallower entry', () => {
@@ -134,8 +151,14 @@ test('priority persists through branch generation and evaluation, then ends once
   assert.deepEqual(graph.choose(), { kind: 'evaluate', node: continuation });
   continuation.trueScore = continuation.value = continuation.candidateScore;
   reply.best = continuation;
+  assert.deepEqual(graph.choose(), { kind: 'expand', node: continuation },
+    'a three-turn line still trails its five-turn predecessor by two turns');
+  const fourthTurn = graph.add(continuation, 90, false);
+  assert.deepEqual(graph.choose(), { kind: 'evaluate', node: fourthTurn });
+  fourthTurn.trueScore = fourthTurn.value = fourthTurn.candidateScore;
+  continuation.best = fourthTurn;
   assert.deepEqual(graph.choose(), { kind: 'expand', node: leader[4] },
-    'three turns meets the five-turn predecessor threshold and restores ordinary priority');
+    'a four-turn line trails its five-turn predecessor by only one turn and restores ordinary priority');
 });
 
 test('the displayed best continuation determines a deficit, not the longest alternate descendant', () => {

@@ -260,17 +260,17 @@ test('the shared top rank deepens while leaving room for shorter side-lines', as
   });
   assert.equal(result.depth, 5);
   assert.equal(result.pvDepth, 5);
-  assert.equal(result.rootActionsSearched, 2);
+  assert.equal(result.rootActionsSearched, 3);
   assert(result.trueEvaluations > result.depth);
   assert.equal(result.expansionRank, 1);
   assert.equal(result.stoppedReason, 'cancelled');
   assert(result.depthStats.every(level => level.candidates > 0 && level.trueEvaluations > 0),
     'deeper search still proceeds before exhausting each frontier');
-  assert.deepEqual(result.rankings[0].entries.slice(0, 2).map(entry => entry.line.length), [5, 2]);
+  assert.deepEqual(result.rankings[0].entries.slice(0, 3).map(entry => entry.line.length), [5, 3, 2]);
   validatePv(position, result);
 });
 
-test('a two-turn side-line catches up to three before the five-turn leader deepens again', async () => {
+test('a three-turn side-line catches up to four before the five-turn leader deepens again', async () => {
   const position = createPosition(), reports = [];
   let stop = false;
   const result = await analyze(position, { ...limits, maxDepth: 8, candidateLimit: 2, innerCandidateLimit: 1,
@@ -279,8 +279,8 @@ test('a two-turn side-line catches up to three before the five-turn leader deepe
   });
   const five = reports.find(report => report.depth === 5).rankings[0].entries;
   const six = reports.find(report => report.depth === 6).rankings[0].entries;
-  assert.deepEqual(five.map(entry => entry.line.length), [5, 2]);
-  assert.deepEqual(six.map(entry => entry.line.length), [6, 3]);
+  assert.deepEqual(five.map(entry => entry.line.length), [5, 3]);
+  assert.deepEqual(six.map(entry => entry.line.length), [6, 4]);
   assert(six.every(entry => entry.evaluationType === 'true'));
   assert.deepEqual(six.map(entry => entry.id), five.map(entry => entry.id),
     'extra search does not artificially promote the side-line in the ranking');
@@ -309,14 +309,14 @@ test('locked-king search deepens without spending its budget proving every shall
   let stop = false;
   // Equal scores isolate terminal-probe work from parent-rank changes that
   // redirect the search. Unbounded shallow probes exceed this work budget.
-  const result = await analyze(position, { ...limits, maxNodes: 10000, maxDepth: 12,
+  const result = await analyze(position, { ...limits, maxNodes: 14000, maxDepth: 12,
     evaluateBatch: zero,
     shouldStop: () => stop,
     onProgress: report => { if (report.depth >= 6) stop = true; },
   });
   assert.equal(result.depth, 6);
   assert.equal(result.stoppedReason, 'cancelled');
-  assert(result.nodes < 10000, 'terminal proofs for unselected candidates must not consume the work budget');
+  assert(result.nodes < 14000, 'terminal proofs for unselected candidates must not consume the work budget');
   assert.equal(positionKey(position), before);
   validatePv(position, result);
 });

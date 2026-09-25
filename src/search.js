@@ -52,7 +52,7 @@ export function createSearchSession(position, options = {}) {
   const qDepth = Math.floor(finiteOption(options.quiescenceDepth, 2, 0, 8));
   const maxTableEntries = Math.floor(finiteOption(options.maxTableEntries, 100_000, 0, 1_000_000));
   const cacheMemoryMb = finiteOption(options.cacheMemoryMb, 128, 0, 4096);
-  const deadline = started + timeMs;
+  const deadline = options.unlimitedTime === true ? Infinity : started + timeMs;
   const tt = new SearchCache(maxTableEntries, Math.floor(cacheMemoryMb * 1024 * 1024));
   const history = new Map(), killers = new Map();
   const evalCache = new WeakMap(), checkCache = new WeakMap(), moveCache = new WeakMap();

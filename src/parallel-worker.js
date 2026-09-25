@@ -5,7 +5,7 @@ import { CANCEL, STOP_ITERATION, claimNode, clock, searchCandidate } from './par
 const shared = new Int32Array(workerData.shared);
 const session = createSearchSession(workerData.position, {
   ...workerData.options,
-  timeMs: Math.max(0, workerData.deadline - clock()),
+  timeMs: workerData.options.unlimitedTime === true ? workerData.options.timeMs : Math.max(0, workerData.deadline - clock()),
   shouldStop: () => Atomics.load(shared, CANCEL) !== 0 || Atomics.load(shared, STOP_ITERATION) !== 0,
   claimNode: kind => claimNode(shared, workerData.options.maxNodes, kind),
 });

@@ -51,7 +51,7 @@ export function chooseWork(rankings, { maxDepth }) {
       // Include the route from the root, matching "Full continuation" in the UI.
       const length = node.depth - 1 + line.length;
       const previousLength = level.depth - 1 + continuation(level.ranked[rank - 1]).length;
-      if (length * 2 >= previousLength || length >= maxDepth
+      if (previousLength - length < 2 || length >= maxDepth
         || node.mateProven || line.tip.terminal || line.tip.mateProven) continue;
       shortLines.push({ node, rank });
     }

@@ -237,12 +237,12 @@ test('cancellation retains the last completed iteration and its exact quiescence
   validatePolicyPv(position, result);
 });
 
-test('cancellation from the event loop stops an active worker pool and preserves the completed result', async () => {
+test('cancellation from the event loop stops an unlimited-time worker pool and preserves the completed result', async () => {
   const position = capturePosition();
   let stopped = false, completedIteration, timer;
   try {
     const result = await analyze(position, {
-      ...limits, maxDepth: 16, quiescenceDepth: 0, threads: 4,
+      ...limits, timeMs: 0, unlimitedTime: true, maxDepth: 16, quiescenceDepth: 0, threads: 4,
       shouldStop: () => stopped,
       onProgress(progress) {
         if (progress.completed) {
