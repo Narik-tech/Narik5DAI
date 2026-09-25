@@ -100,6 +100,7 @@ test('training options supply defaults and allow continuous runs with adjusted l
   assert.equal(TRAINING_DEFAULTS.arenaConcurrency, 1, 'Arena games are sequential unless concurrency is requested.');
   assert.equal(validateTrainingOptions({ gameConcurrency: 4 }).arenaConcurrency, 1, 'Arena concurrency is independent of self-play.');
   assert.equal(validateTrainingOptions({ arenaConcurrency: 4 }).gameConcurrency, 1, 'Arena concurrency does not alter self-play.');
+  assert.equal(validateTrainingOptions({ maxDepth: 64 }).maxDepth, 64);
 });
 
 test('training options reject malformed numbers, invalid ranges and inconsistent promotion thresholds', () => {
@@ -110,7 +111,7 @@ test('training options reject malformed numbers, invalid ranges and inconsistent
   }
   for (const options of [
     { games: 0 }, { gameConcurrency: 0 }, { gameConcurrency: 9 }, { arenaConcurrency: 0 }, { arenaConcurrency: 9 },
-    { iterations: -1 }, { batchSize: 129 }, { maxDepth: 17 },
+    { iterations: -1 }, { batchSize: 129 }, { maxDepth: 65 },
     { learningRate: 0 }, { learningRate: 0.11 }, { exploration: -0.01 }, { outcomeWeight: 1.01 },
     { promotionScore: 0.5 }, { promotionScore: 1.01 }, { arenaPairs: 1, minPairs: 2 }, { device: 'shell' },
   ]) assert.throws(() => validateTrainingOptions(options), undefined, JSON.stringify(options));

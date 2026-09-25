@@ -41,7 +41,7 @@ function fractionalValue(position) {
   return ((hash >>> 0) % 2001 - 1000) / 1000;
 }
 // Independent exhaustive minimax over the same bounded candidate universe.
-// Fractional values exercise alpha-beta bounds that must not assume integer scores.
+// Fractional values exercise ordering and backups without integer rounding.
 function minimax(position, remaining, candidateLimit, innerCandidateLimit = candidateLimit, ply = 0) {
   const side = position.action % 2 ? -1 : 1;
   if (!remaining && firstActions(position, 1).length) return { score: fractionalValue(position), actions: [] };
@@ -83,7 +83,7 @@ test('neural batch values select different legal actions for White without chang
       evaluateBatch: async positions => { seen.push(...positions.map(positionKey)); return positions.map(pos => positionKey(pos) === wanted ? 321 : -100); },
     });
     assert.equal(result.engine, 'transformer');
-    assert.equal(result.searchPolicy, 'transformer-bounded-alpha-beta');
+    assert.equal(result.searchPolicy, 'transformer-ranked-depth');
     assert.equal(result.depth, 1);
     assert.equal(result.score, 321);
     assert.equal(result.completed, true);
@@ -146,7 +146,7 @@ test('turn-zero continuations agree after submitting d4 at the same remaining de
   }
 });
 
-test('ordered alpha-beta respects depth and returns full-turn legal PV', async () => {
+test('ranked depth search respects its ceiling and returns a full-turn legal PV', async () => {
   const position = createPosition(), reports = [];
   const result = await analyze(position, { ...limits, maxDepth: 3, candidateLimit: 4, innerCandidateLimit: 3, maxCachedPositions: 2,
     evaluateBatch: zero, onProgress: report => { if (report.completed) reports.push(report.depth); },
@@ -155,7 +155,7 @@ test('ordered alpha-beta respects depth and returns full-turn legal PV', async (
   assert.equal(result.stoppedReason, 'depth');
   assert.equal(result.pv.length, 3);
   assert.equal(result.rootActionsSearched, 4);
-  assert(result.cutoffs > 0);
+  assert.equal(result.cutoffs, 0);
   assert.equal('beamWidth' in result, false);
   assert.equal('beamPruned' in result, false);
   assert.equal('beamWidth' in result.limits, false);
@@ -185,8 +185,7 @@ test('a sixth-ranked shallow move remains searchable and wins at depth two', asy
   validatePv(position, result);
 });
 
-test('ordered alpha-beta agrees with fractional minimax for both colors, horizons, and candidate caps', async () => {
-  let cutoffs = 0;
+test('an exhausted frontier agrees with fractional minimax for both colors, horizons, and candidate caps', async () => {
   for (const position of [createPosition(), createPosition({ pgn: '1. e4' })]) {
     for (const [candidateLimit, innerCandidateLimit] of [[2, 2], [4, 4], [5, 3]]) {
       for (const maxDepth of [1, 2, 3]) {
@@ -200,12 +199,10 @@ test('ordered alpha-beta agrees with fractional minimax for both colors, horizon
         assert(expected.actions.some(action => JSON.stringify(action) === JSON.stringify(result.bestAction)), context);
         assert.equal(result.rootActionsSearched, candidateLimit, context);
         assert.equal(result.pv.length, maxDepth, context);
-        cutoffs += result.cutoffs;
         validatePv(position, result);
       }
     }
   }
-  assert(cutoffs > 0, 'oracle comparisons must include actual alpha-beta pruning');
 });
 
 test('multiple active boards are evaluated and played as complete submissions', async () => {
@@ -214,6 +211,109 @@ test('multiple active boards are evaluated and played as complete submissions', 
   assert.equal(result.depth, 1);
   assert(result.bestAction.length >= 2);
   assert.equal(validatePv(position, result).action, 1);
+});
+
+test('candidate ordering averages every component before promoting the submitted True value', async () => {
+  for (const action of [0, 1]) {
+    const position = smallPosition([
+      Array.from({ length: action + 1 }, smallBoard), null,
+      Array.from({ length: action + 1 }, smallBoard),
+    ], action);
+    const side = action ? -1 : 1;
+    const choices = [...generateActions(position)];
+    const multi = choices.filter(candidate => candidate.moves.length === 2);
+    const first = multi[0], partialKey = positionKey(applyMove(position, first.moves[0]));
+    const alternate = multi.find(candidate => positionKey(applyMove(position, candidate.moves[0])) !== partialKey
+      && JSON.stringify(candidate.moves[0]) !== JSON.stringify(first.moves[1]));
+    const single = choices.find(candidate => candidate.moves.length === 1);
+    for (const [favorite, fullValue] of [[alternate, 900], [single, 600]]) {
+      const wanted = positionKey(favorite.position);
+      let stop = false;
+      const result = await analyze(position, { ...limits, candidateLimit: 256,
+        shouldStop: () => stop,
+        onProgress: report => { if (report.completed) stop = true; },
+        evaluateBatch: async positions => positions.map(pos => side * (
+          positionKey(pos) === partialKey ? 1000 : positionKey(pos) === wanted ? fullValue : 0)),
+      });
+      assert.equal(result.trueEvaluations, 1, 'only the scheduled candidate becomes True');
+      if (favorite === alternate) {
+        // (1000 + 0) / 2 beats (0 + 900) / 2, although its full score is worse.
+        assert.equal(positionKey(applyMove(position, result.bestAction[0])), partialKey);
+        assert.equal(Math.abs(result.score), 0, 'the returned score is the full True value, not the mean');
+        assert.equal(result.depthStats[0].searchedMoves, 0, 'the new True score drops behind candidates');
+      } else {
+        // 600 beats (1000 + 0) / 2. Summing components would select incorrectly.
+        assert.deepEqual(result.bestAction, single.moves);
+        assert.equal(result.score, side * 600);
+      }
+      validatePv(position, result);
+    }
+  }
+});
+
+test('the shared top rank reaches deeper turns before finishing shallow candidate comparisons', async () => {
+  const position = createPosition();
+  let stop = false;
+  const result = await analyze(position, { ...limits, maxDepth: 5, candidateLimit: 8,
+    shouldStop: () => stop, evaluateBatch: zero,
+    onProgress: report => { if (report.depth === 5) stop = true; },
+  });
+  assert.equal(result.depth, 5);
+  assert.equal(result.pvDepth, 5);
+  assert.equal(result.rootActionsSearched, 1);
+  assert.equal(result.trueEvaluations, 5);
+  assert.equal(result.expansionRank, 1);
+  assert.equal(result.stoppedReason, 'cancelled');
+  assert.deepEqual(result.depthStats.map(level => [level.candidates, level.trueEvaluations, level.searchedMoves]),
+    Array.from({ length: 5 }, () => [7, 1, 1]));
+  validatePv(position, result);
+});
+
+test('ranked search can reach beyond the former UI depth ceiling with legal complete turns', async () => {
+  const position = createPosition();
+  const result = await analyze(position, { ...limits, maxDepth: 20, candidateLimit: 1, evaluateBatch: zero });
+  assert.equal(result.depth, 20);
+  assert.equal(result.pvDepth, 20);
+  assert.equal(result.selectiveDepth, 20);
+  assert.equal(result.stoppedReason, 'depth');
+  assert.equal(result.expansionRank, null, 'every admitted candidate has been evaluated');
+  validatePv(position, result);
+});
+
+test('locked-king search deepens without spending its budget proving every shallow successor terminal', async () => {
+  const position = createPosition({ pgn: '[Board "custom"]\n[k7/pn6/K7/8/8/8/6PB/8:0:1:w]' });
+  const before = positionKey(position);
+  let stop = false;
+  const result = await analyze(position, { ...limits, maxNodes: 50000, maxDepth: 12,
+    evaluateBatch: async positions => positions.map(fractionalValue),
+    shouldStop: () => stop,
+    onProgress: report => { if (report.depth >= 6) stop = true; },
+  });
+  assert.equal(result.depth, 6);
+  assert.equal(result.stoppedReason, 'cancelled');
+  assert(result.nodes < 50000, 'terminal proofs for unselected candidates must not consume the work budget');
+  assert.equal(positionKey(position), before);
+  validatePv(position, result);
+});
+
+test('new True replies replace the parent neural value for both colors', async () => {
+  for (const position of [createPosition(), createPosition({ pgn: '1. e4' })]) {
+    const side = position.action % 2 ? -1 : 1;
+    const favorite = firstActions(position)[0], rootKey = positionKey(favorite.position);
+    const replies = new Set(firstActions(favorite.position, 64).map(candidate => positionKey(candidate.position)));
+    let stop = false;
+    const result = await analyze(position, { ...limits, maxDepth: 3, candidateLimit: 4,
+      shouldStop: () => stop,
+      onProgress: report => { if (report.depth === 2) stop = true; },
+      evaluateBatch: async positions => positions.map(pos => side * (
+        positionKey(pos) === rootKey ? 1000 : replies.has(positionKey(pos)) ? -400 : -1000)),
+    });
+    assert.deepEqual(result.bestAction, favorite.moves);
+    assert.equal(result.score, side * -400);
+    assert.equal(result.pvDepth, 2);
+    assert.equal(result.trueEvaluations, 2);
+    validatePv(position, result);
+  }
 });
 
 test('strongest partial successors compose a legal multi-board turn with correct action semantics', async () => {
@@ -387,7 +487,7 @@ test('cancellation after an awaited batch discards that batch', async () => {
   validatePv(position, result);
 });
 
-test('cancellation retains the last completed iteration', async () => {
+test('cancellation retains the latest backed true evaluation', async () => {
   const position = createPosition();
   let stop = false, saved;
   const result = await analyze(position, { ...limits, maxDepth: 4, candidateLimit: 4, evaluateBatch: zero,
@@ -421,6 +521,7 @@ test('terminal statuses require exhausted unrestricted legal generation', async 
     assert.equal(result.score, score);
     assert.equal(result.completed, true);
     assert.equal(result.bestAction, null);
+    assert.equal(result.mateProven, expected === 'checkmate');
     assert.equal(result.terminalProof, 'unrestricted-legal-exhaustion');
   }
 });
@@ -450,17 +551,17 @@ test('mate proof survives a winning witness but requires every move for a losing
   assert.equal(replyCap.mateProven, true, 'each legal root move has a certified opponent winning witness');
 });
 
-test('a mate witness can cause a safe cutoff without claiming that every root move loses', async () => {
+test('a losing continuation cannot claim that every root move loses', async () => {
   const position = createPosition({ pgn: '[Board "Custom"]\n[Size "4x4"]\n[4/2q1/4/K2k:0:1:w]' });
   const safe = firstActions(position).find(candidate => formatAction(position, candidate.moves) === '(0T1)Ka2');
   const safeKey = positionKey(safe.position);
-  // Search the safe move first. Black's mating reply to Kb1 then proves that
-  // root alternative cannot improve the bound, without exhausting its replies.
+  // Search the safe move first. Black's mating reply to Kb1 must not turn
+  // a losing root alternative into a losing claim about every root move.
   const result = await analyze(position, { ...limits, maxDepth: 2,
     evaluateBatch: async positions => positions.map(pos => positionKey(pos) === safeKey ? 100 : 0),
   });
   assert.equal(result.depth, 2);
-  assert(result.cutoffs > 0);
+  assert.equal(result.cutoffs, 0);
   assert.equal(result.candidateCaps, 0);
   assert.deepEqual(result.bestAction, safe.moves);
   assert.equal(result.score, 0);

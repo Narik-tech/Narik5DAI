@@ -85,6 +85,19 @@ test('inference error is surfaced, never converted into a classical result', asy
   assert.equal(job.result, undefined);
 });
 
+test('transformer accepts deeper depth while classical retains its depth cap', async t => {
+  const { request, wait } = await fixture(t, mockRuntime());
+  for (const body of [
+    { engine: 'transformer', maxDepth: 65 },
+    { engine: 'classical', maxDepth: 17 },
+  ]) assert.equal((await request('/api/analyze', body)).status, 400, JSON.stringify(body));
+  const created = await request('/api/analyze', { engine: 'transformer', timeMs: 1000, maxNodes: 1, maxDepth: 64 });
+  assert.equal(created.status, 202, created.data.error);
+  const job = await wait(created.data.jobId);
+  assert.equal(job.status, 'done', job.error);
+  assert.equal(job.result.limits.maxDepth, 64);
+});
+
 test('model loading cannot attach a search to a position that changed while loading', async t => {
   const runtime = mockRuntime();
   let finish, started;

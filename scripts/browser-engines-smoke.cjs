@@ -54,7 +54,9 @@ const fs = require('node:fs/promises');
       const response = await route.fetch();
       const data = await response.json();
       if (data.result) Object.assign(data.result, {
-        engine:'transformer', searchPolicy:legacySearch ? 'transformer-bounded-beam' : 'transformer-bounded-alpha-beta',
+        engine:'transformer', searchPolicy:legacySearch ? 'transformer-bounded-beam' : 'transformer-ranked-depth',
+        expansionRank:3, depth:5, pvDepth:2,
+        depthStats:[{depth:1,candidates:60,trueEvaluations:4,searchedMoves:4,topCandidateRank:5}, {depth:2,candidates:0,trueEvaluations:3,searchedMoves:null,topCandidateRank:null}],
         contextTruncated:true, frontierTruncated:true,
         limits:{...data.result.limits, candidateLimit:64, innerCandidateLimit, ...(legacySearch ? {beamWidth:4} : {})},
         model:{device:'cuda:0', config:{max_tokens:1024}},
@@ -65,20 +67,24 @@ const fs = require('node:fs/promises');
     await page.goto(`http://127.0.0.1:${server.address().port}`);
     await page.locator('#connection.online').waitFor();
     assert.equal(await page.locator('#engine-select').inputValue(), 'classical');
+    assert.equal(await page.locator('#search-depth option[value="64"]').evaluate(option => option.disabled), true);
     await page.locator('#engine-select').selectOption('transformer');
     await page.locator('#engine-readiness').filter({hasText:'setup required'}).waitFor();
     assert.equal(await page.locator('#analyze-button').isDisabled(), true);
     assert.equal(await page.locator('#cache-memory').isDisabled(), true);
+    await page.locator('#search-depth').selectOption('64');
     await page.locator('#transformer-setup summary').click();
     assert.match(await page.locator('#transformer-setup').textContent(), /npm run transformer:setup/);
     assert.match(await page.locator('#engine-description').textContent(), /strength is unmeasured/);
     await page.reload();
     await page.locator('#connection.online').waitFor();
     assert.equal(await page.locator('#engine-select').inputValue(), 'transformer', 'Selected engine persists on reload.');
+    assert.equal(await page.locator('#search-depth').inputValue(), '64', 'Deep transformer limit persists on reload.');
     assert.equal(await page.locator('#analyze-button').isDisabled(), true);
     await page.locator('#engine-select').selectOption('classical');
     await page.waitForFunction(() => !document.getElementById('analyze-button').disabled);
     assert.equal(await page.locator('#cache-memory').isDisabled(), false);
+    assert.equal(await page.locator('#search-depth').inputValue(), '16', 'Classical selection keeps its supported depth limit.');
 
     available = true;
     await page.locator('#refresh-engines').click();
@@ -108,14 +114,18 @@ const fs = require('node:fs/promises');
     await page.waitForFunction(() => !document.getElementById('play-button').disabled, null, {timeout:15000});
     assert.match(await page.locator('#stat-cache').textContent(), /cuda:0/);
     const note = await page.locator('#analysis-note').textContent();
-    assert.match(note, /Transformer alpha-beta search; up to 64 candidate turns per position/);
+    assert.match(note, /Transformer ranked depth search; up to 64 candidate turns per position/);
+    assert.match(note, /Shared evaluated ranks: 3/);
+    assert.match(note, /Searched moves by depth: 1: 4 · 2: no candidates/);
+    assert.match(await page.locator('#stat-depth').getAttribute('title'), /Deepest true evaluation: 5 turns.*Current best line: 2 turns/);
+    assert.doesNotMatch(note, /no full depth completed/);
     assert.doesNotMatch(note, /best 4 deepened/);
     assert.match(note, /1024 tokens/);
     assert.match(note, /Historical context was truncated/);
     assert.match(note, /current-board features were omitted/);
     innerCandidateLimit = 16;
     await page.locator('#analyze-button').click();
-    await page.locator('#analysis-note').filter({hasText:'Transformer alpha-beta search; up to 64 root / 16 reply candidate turns'}).waitFor();
+    await page.locator('#analysis-note').filter({hasText:'Transformer ranked depth search; up to 64 root / 16 reply candidate turns'}).waitFor();
     await page.waitForFunction(() => !document.getElementById('play-button').disabled);
     legacySearch = true;
     await page.locator('#analyze-button').click();

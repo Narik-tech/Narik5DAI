@@ -18,13 +18,14 @@ test('self-play CLI defaults to one bounded cycle and accepts continuous mode', 
   assert.equal(options.steps, 3);
   assert.equal(options.gameConcurrency, 4);
   assert.equal(options.arenaConcurrency, 3);
+  assert.equal(parseArguments(['--depth', '64']).maxDepth, 64);
 });
 
 test('self-play CLI rejects malformed limits and unsafe promotion thresholds', () => {
   for (const args of [ ['--games', '0'], ['--steps', '1.5'], ['--nodes', 'NaN'], ['--iterations', '-1'],
     ['--game-concurrency', '0'], ['--game-concurrency', '9'], ['--game-concurrency', '1.5'], ['--game-concurrency', 'NaN'],
     ['--arena-concurrency', '0'], ['--arena-concurrency', '9'], ['--arena-concurrency', '1.5'], ['--arena-concurrency', 'NaN'],
-    ['--exploration', '1.1'], ['--outcome-weight', '-.1'], ['--promotion-score', '.5'],
+    ['--exploration', '1.1'], ['--outcome-weight', '-.1'], ['--promotion-score', '.5'], ['--depth', '65'],
     ['--arena-pairs', '2', '--min-pairs', '3'], ['--batch-size', '129'], ['--device', 'bogus'], ['--steps'], ['--bogus', '1'] ]) {
     assert.throws(() => parseArguments(args), undefined, args.join(' '));
   }

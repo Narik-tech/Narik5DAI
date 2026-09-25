@@ -55,37 +55,69 @@ npm run analyze -- --engine transformer --time 3 --depth 3
 
 ## Search architecture
 
-The transformer engine uses its own asynchronous search implementation. While
-the rules engine assembles a turn, the transformer evaluates every distinct
-partial-move successor eligible in the current generation pass at each visited
-prefix in GPU batches of at most 128.
-It orders components by strength for the mover before applying the full-turn
-candidate cap. Incomplete turns retain the mover's action; only successors the
-rules engine permits submitting advance the action for evaluation. Scores are
-cached by the complete resulting history during candidate assembly, so commuting
-move orders reuse evaluations while different temporal branches remain distinct.
+The transformer engine uses its own asynchronous search with rankings at every
+complete-turn depth. It distinguishes two kinds of evaluation:
 
-The rules engine shares the same legal traversal with classical search and
-continues to enforce present advancement and royal safety on complete turns.
-Complete successor evaluations are reused for candidate ranking, and proven
-terminal outcomes override neural scores. White-relative neural scores are
-converted to the mover's perspective for ordering and negamax alpha-beta search.
-Iterative deepening retains the best completed result, or an explicitly partial
-result if a time, work, or cancellation limit interrupts the search. A legal,
-unscored fallback is retained before the first model request when the budget permits.
-As complete legal root turns are scored, their evaluations replace that fallback
-with the best scored turn, even if a later batch or candidate is interrupted
-before the generator yields. This provisional result still reports depth zero and
-`completed: false`; incomplete component-turn scores never become playable
-recommendations. A completed iteration takes precedence over provisional results.
+- A **Candidate Evaluation** is the average White-relative score of the partial
+  successors along a complete legal turn, including its final submitted
+  successor. Each partial successor receives a shallow neural evaluation with no
+  continuation search. A turn containing several component moves therefore uses
+  every prefix's score, not just the final board's score.
+- A **True Evaluation** starts with the neural value of the complete submitted
+  successor. When the scheduler selects a candidate, it reuses that value if
+  candidate generation already scored the successor. Once True continuations
+  exist, the value resolves to the best True continuation for the player acting
+  in that position. Candidate-only continuations do not replace its True value.
+  Proven terminal outcomes override neural scores.
+
+At each depth, Candidate and resolved True Evaluations share a ranking from
+strongest to weakest for the player making that depth's turn. **Searched Moves**
+counts the consecutive True Evaluations ahead of the first Candidate Evaluation.
+Rankings and their prefix counts are recomputed as continuation values propagate
+back through the tree.
+
+The scheduler repeats the following while time and work remain:
+
+1. Find the smallest Searched Moves count across depths that still have
+   Candidate Evaluations. This is the current common True prefix; a depth with
+   no remaining candidates does not hold it back.
+2. If a nonterminal True Evaluation within that prefix has no generated
+   continuations and can expand below Max depth, generate its candidates. Choose
+   the strongest eligible rank across depths, then the shallower depth on a tie.
+3. Otherwise, select the highest-ranked candidate at the depth with the fewest
+   Searched Moves and give it a True Evaluation. Shallower depth wins ties.
+
+There is no fixed `n` or `searchWidth` setting. When every pending depth has a
+True Evaluation in first place, rank one becomes eligible for expansion. When
+every pending depth has two leading True Evaluations, the top two ranks become
+eligible. Eligibility is recalculated whenever the rankings change. When no candidates remain,
+the scheduler can expand any remaining eligible True Evaluation. Max depth is
+a ceiling on complete turns and supports values up to **64**.
+
+During candidate construction, the transformer evaluates every distinct
+partial-move successor eligible at each visited prefix in batches of at most
+128. It orders components by strength for the mover before applying the
+full-turn candidate cap. Incomplete turns retain the mover's action; only
+successors the rules engine permits submitting advance the action for
+evaluation. Scores are cached by the complete resulting history during candidate
+assembly, so commuting move orders reuse evaluations while different temporal
+branches remain distinct. The shared rules traversal enforces present
+advancement and royal safety on complete turns.
+
+During candidate construction, each preliminary terminal check uses at most
+64 generation work nodes. A check that cannot finish leaves terminal status
+unknown and uses the shallow neural score for candidate ordering. The selected
+True Evaluation performs the full legal terminal check under the remaining
+search budget. This keeps expensive mate proofs for speculative component
+successors from blocking deeper search; an unfinished check never certifies
+mate, stalemate, or the existence of a legal reply.
 
 Defaults retain up to **64 candidates per position**, at the root and in
-replies. Neural component ordering guides candidate membership; **every admitted candidate
-is eligible for deeper search**, with no fixed best-four beam. Alpha-beta skips
-branches only when the search bounds show that they cannot improve the choice
-within this candidate tree. At depth one, every generated candidate receives a
-value. Root candidates and a bounded cache of **128 inner expansions** can be
-reused across iterations.
+replies; each cap supports values up to **256**. Every admitted candidate remains
+eligible for True Evaluation and deeper search within the budget. A separate
+cache defaults to **128 inner candidate-generation results**. This metadata
+cache limit does not bound the retained search tree: the tree retains generated
+nodes and is constrained by the work budget, candidate caps, and Max depth.
 
 Candidate generation prioritizes complete turns using only currently required
 boards. Turns that use optionally playable boards (future or inactive boards)
@@ -102,25 +134,41 @@ complete-turn generator. Scoring all components at a visited prefix does not
 evaluate every combination of components: the cap can still omit strong full
 turns, including optional or temporal continuations. Time and work limits can
 also interrupt component scoring. This is selective search, so reaching a
-requested depth does not mean all legal alternatives were evaluated. The analysis reports
-`searchPolicy: transformer-bounded-alpha-beta`, candidate caps, and alpha-beta
-`cutoffs`; `beamWidth` and `beamPruned` are no longer search options or result
-fields. The UI's classical transposition-cache setting applies only to the
-classical engine; transformer candidate storage has its own bounds.
+requested depth does not mean all legal alternatives were evaluated. The
+analysis reports `searchPolicy: transformer-ranked-depth` and candidate caps.
+`depth` is the deepest True Evaluation reached, `pvDepth` is the length of the
+selected principal variation, and `selectiveDepth` is the deepest generated or
+probed turn, including work in interrupted generation. These can differ.
+`depthStats` reports each depth's candidate
+count, True Evaluation count, Searched Moves, and highest candidate rank;
+`searchedMoves: null` means the depth has no pending candidates. `expansionRank`
+reports the common True prefix, or `null` when no candidates remain and there
+is no finite rank cap on expansion. The UI's classical transposition-cache
+setting applies only to the classical engine.
+
+`completed: true` means a True root evaluation is available or the root was
+proved terminal; it does not mean a full-depth iteration finished. Interruption
+retains the latest backed-up True values. Before that point, a legal unscored
+fallback is retained when the budget permits. During root candidate generation,
+complete submitted successors with known values can replace that fallback even
+if a later component batch is interrupted. This provisional result reports
+depth zero and `completed: false`; incomplete component turns never become
+playable recommendations.
 
 Evaluating all component alternatives adds work and can require several dependent
-inference batches while assembling multi-board turns. The search can complete
-fewer turns of depth within the same time or work budget. This change uses the
-existing value network and checkpoint; no
-new training or move-policy head is required.
+inference batches while assembling multi-board turns. The search can reach
+fewer turns of depth within the same time or work budget. This search uses the
+existing value network and checkpoint; no new training or move-policy head is
+required.
 
 The default reply cap follows `candidateLimit`, so moving a position from a
 continuation to the root keeps its candidate coverage. Advanced callers can
 override `innerCandidateLimit`; a smaller reply cap can produce a different
 line when that position is analyzed directly. To compare continuations, use the
-same checkpoint and search settings, and compare completed depth **D** before
-the move with completed depth **D − 1** after it. Max depth is only a ceiling;
-time and work limits can stop either search earlier.
+same checkpoint and search settings and inspect the principal variation and
+per-depth statistics. Reaching depth **D** before a move and **D − 1** after it
+does not imply equal coverage: the dynamic rankings may allocate work
+differently. Time and work limits can stop either search below Max depth.
 
 Terminal checks use full legal generation. Mate is certified only where the
 necessary continuations and opposing replies have been proved: a single

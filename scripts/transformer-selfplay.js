@@ -87,7 +87,7 @@ export function parseArguments(args, initialOptions = defaults) {
   }
   for (const [name, min, max] of [
     ['iterations', 0, 1000000], ['games', 1, 128], ['gameConcurrency', 1, 8], ['maxPlies', 1, 256], ['maxNodes', 1, 10000000],
-    ['maxDepth', 1, 16], ['timeMs', 1, 60000], ['terminalWork', 1, 10000000], ['explorationPlies', 0, 256],
+    ['maxDepth', 1, 64], ['timeMs', 1, 60000], ['terminalWork', 1, 10000000], ['explorationPlies', 0, 256],
     ['steps', 1, 1000000], ['batchSize', 1, 128], ['replaySize', 1, 100000], ['seed', 0, 0xffffffff],
     ['arenaPairs', 1, 128], ['arenaConcurrency', 1, 8], ['minPairs', 1, 128], ['arenaPlies', 1, 256], ['keepIterations', 1, 100],
   ]) if (!Number.isSafeInteger(options[name]) || options[name] < min || options[name] > max) throw new Error(`Invalid ${name}: expected integer ${min}..${max}.`);

@@ -1,4 +1,5 @@
 import { applyMove, canSubmit, createPositionKeyCache, generateActions, generateActionsAsync, inCheck, raw } from './rules.js';
+import { chooseWork, rankDepths } from './transformer-frontier.js';
 
 export const MATE_SCORE = 100_000;
 const MATE_THRESHOLD = MATE_SCORE - 1000;
@@ -6,13 +7,15 @@ const sign = position => position.action % 2 === 0 ? 1 : -1;
 const finite = (value, fallback, min, max) => Number.isFinite(Number(value))
   ? Math.max(min, Math.min(max, Number(value))) : fallback;
 class SearchInterrupted extends Error {}
+class TerminalProbeDeferred extends Error {}
+const SHALLOW_TERMINAL_WORK = 64;
 
 /**
  * Neural value search over complete legal submissions. Distinct partial-move
  * successors are scored in batches to assemble the strongest components first,
- * before the full-turn candidate cap. Complete candidates are then searched
- * in neural-value order with alpha-beta. Every admitted candidate is eligible
- * for deepening; only a search bound can cut off the remaining alternatives.
+ * before the full-turn candidate cap. Candidate values average their component
+ * scores. A persistent ranked frontier schedules true evaluations and selective
+ * expansion across depths, backing up only evaluated continuations.
  * Candidate caps still make this selective, not exhaustive full-rule minimax.
  * Values are always White centipawns.
  * The evaluator is required: no classical evaluation replaces a missing model.
@@ -32,14 +35,16 @@ export async function analyze(position, options = {}) {
   const deadline = started + timeMs, rootSign = sign(position);
   const keyPosition = createPositionKeyCache();
   const candidateCache = new Map(), terminalCache = new WeakMap(), valueCache = new WeakMap();
-  const preferredActions = new WeakMap();
+  const levels = [];
+  const root = { position, depth: 0, children: null, parent: null };
+  let nextIndex = 0, trueEvaluations = 0;
   let rootCandidates = null;
   let nodes = 0, searchNodes = 0, generationNodes = 0, evaluations = 0, inferenceBatches = 0;
   let depth = 0, searchingDepth = 0, selectiveDepth = 0, rootActionsSearched = 0;
-  let bestAction = null, pv = [], score = null, rootPartial = null, rootFallback = null;
+  let bestAction = null, pv = [], score = null, rootFallback = null;
   let completed = false, status = 'incomplete', stoppedReason = null;
   let mateProven = false;
-  let candidateCaps = 0, cutoffs = 0, lastProgress = started;
+  let candidateCaps = 0, lastProgress = started;
 
   function check(includeNodes = true) {
     if (options.shouldStop?.()) stoppedReason = 'cancelled';
@@ -69,6 +74,7 @@ export async function analyze(position, options = {}) {
     // the same temporal move after another component can create a new branch.
     // Keep this cache only while assembling this position's candidate turns.
     const partials = new Map();
+    const prefixScores = new Map([[JSON.stringify([]), { sum: 0, count: 0 }]]);
     let hasOptionalMoves = false;
     const generationOptions = { tick, keyPosition, skipOptionalSpatial: false };
     async function orderMoves(current, moves, prefix, requiredOnly = false) {
@@ -92,7 +98,10 @@ export async function analyze(position, options = {}) {
         const key = keyPosition(successor);
         let entry = partials.get(key);
         if (!entry) {
-          const terminal = complete ? probeTerminal(successor, ply + 1) : null;
+          // Candidate construction must stay shallow. A difficult mate proof
+          // belongs to the selected True evaluation, not every component that
+          // might later be discarded by the candidate cap.
+          const terminal = complete ? probeTerminal(successor, ply + 1, SHALLOW_TERMINAL_WORK) : null;
           entry = { position: successor, terminal, complete };
           partials.set(key, entry);
           if (!terminal) pending.push(successor);
@@ -121,14 +130,30 @@ export async function analyze(position, options = {}) {
       for (const { entry } of ordered) {
         entry.value ??= entry.terminal ? -entry.terminal.score : valueCache.get(entry.position) * sign(current);
       }
+      const prefixScore = prefixScores.get(JSON.stringify(prefix));
+      for (const { move, entry } of ordered) {
+        prefixScores.set(JSON.stringify([...prefix, move]), {
+          sum: prefixScore.sum + entry.value * sign(current), count: prefixScore.count + 1,
+        });
+      }
       return ordered.sort((a, b) => Number(b.required) - Number(a.required) || b.entry.value - a.entry.value || a.index - b.index)
         .map(item => item.move);
     }
-    function reuseEvaluation(candidate) {
+    async function reuseEvaluation(candidate) {
       const entry = partials.get(keyPosition(candidate.position));
       if (entry?.complete) {
-        terminalCache.set(candidate.position, Boolean(entry.terminal));
+        // A bounded probe can leave terminal status unknown. Never turn an
+        // unfinished proof into a cached nonterminal result.
+        if (terminalCache.has(entry.position)) terminalCache.set(candidate.position, terminalCache.get(entry.position));
         if (!entry.terminal) valueCache.set(candidate.position, valueCache.get(entry.position));
+      }
+      const components = prefixScores.get(JSON.stringify(candidate.moves));
+      if (components?.count) candidate.candidateScore = components.sum / components.count;
+      else {
+        // Submitting an already-complete turn has no components to average.
+        const terminal = probeTerminal(candidate.position, ply + 1, SHALLOW_TERMINAL_WORK);
+        if (!terminal && !valueCache.has(candidate.position)) await infer([candidate.position]);
+        candidate.candidateScore = terminal ? terminal.score * sign(candidate.position) : valueCache.get(candidate.position);
       }
       return candidate;
     }
@@ -139,13 +164,13 @@ export async function analyze(position, options = {}) {
       orderMoves: (current, moves, prefix) => orderMoves(current, moves, prefix, true),
     })) {
       generated.add(keyPosition(candidate.position));
-      yield reuseEvaluation(candidate);
+      yield await reuseEvaluation(candidate);
     }
     if (!hasOptionalMoves) return;
     // Replay unrestricted generation to preserve optional-before-required
     // sequences whose ordering changes a temporal arrival into a branch.
     for await (const candidate of generateActionsAsync(pos, { ...generationOptions, orderMoves })) {
-      if (!generated.has(keyPosition(candidate.position))) yield reuseEvaluation(candidate);
+      if (!generated.has(keyPosition(candidate.position))) yield await reuseEvaluation(candidate);
     }
   }
   function terminalValue(pos, ply) {
@@ -153,11 +178,17 @@ export async function analyze(position, options = {}) {
   }
   // A single legal submission disproves terminal status. Only reaching done
   // without a work/time interruption proves mate or stalemate.
-  function probeTerminal(pos, ply) {
+  function probeTerminal(pos, ply, maxWork = Infinity) {
     if (!terminalCache.has(pos)) {
       tick('search');
-      const legal = generateActions(pos, { tick, keyPosition, skipOptionalSpatial: false });
+      selectiveDepth = Math.max(selectiveDepth, ply);
+      let work = 0;
+      const legal = generateActions(pos, { tick: () => {
+        if (work >= maxWork) throw new TerminalProbeDeferred();
+        work++; tick();
+      }, keyPosition, skipOptionalSpatial: false });
       try { terminalCache.set(pos, legal.next().done); }
+      catch (error) { if (!(error instanceof TerminalProbeDeferred)) throw error; }
       finally { legal.return?.(); }
     }
     return terminalCache.get(pos) ? terminalValue(pos, ply) : null;
@@ -201,9 +232,8 @@ export async function analyze(position, options = {}) {
     if (!exhaustive) candidateCaps++;
     terminalCache.set(pos, exhaustive && !items.length);
     const result = { items, exhaustive };
-    // A WeakMap of candidate arrays still retains the entire tree transitively:
-    // each cached parent owns the positions used as keys by its descendants.
-    // Keep the root plus a bounded FIFO of inner expansions instead.
+    // Bound the auxiliary expansion cache independently of the retained search
+    // tree. The time/work budgets, rather than this cache limit, bound the tree.
     if (ply === 0) rootCandidates = result;
     else if (maxCachedPositions) {
       if (candidateCache.size >= maxCachedPositions) candidateCache.delete(candidateCache.keys().next().value);
@@ -238,76 +268,94 @@ export async function analyze(position, options = {}) {
     evaluations += values.length;
     positions.forEach((pos, index) => valueCache.set(pos, Math.max(-MATE_THRESHOLD + 1, Math.min(MATE_THRESHOLD - 1, values[index]))));
   }
-  async function rank(items, ply, parentSign) {
-    const pending = [];
-    const ranked = items.map((candidate, index) => {
-      selectiveDepth = Math.max(selectiveDepth, ply);
-      const terminal = probeTerminal(candidate.position, ply);
-      if (!terminal && !valueCache.has(candidate.position)) pending.push(candidate.position);
-      return { ...candidate, terminal, index };
-    });
-    // The inference service accepts at most 128 positions per request even when
-    // an advanced caller increases the root candidate cap above that value.
-    for (let offset = 0; offset < pending.length; offset += 128) await infer(pending.slice(offset, offset + 128));
-    for (const item of ranked) {
-      item.value = item.terminal ? -item.terminal.score : valueCache.get(item.position) * parentSign;
+  async function expand(node) {
+    searchingDepth = node.depth + 1;
+    const generated = await candidates(node.position, node.depth);
+    node.exhaustive = generated.exhaustive;
+    node.children = generated.items.map(candidate => ({
+      ...candidate, parent: node, depth: node.depth + 1, index: nextIndex++,
+      trueScore: null, value: null, children: null, terminal: null,
+      mateProven: false, best: null,
+    }));
+    if (node.children.length) {
+      (levels[node.depth + 1] ??= []).push(...node.children);
+      selectiveDepth = Math.max(selectiveDepth, node.depth + 1);
     }
-    return ranked.sort((a, b) => b.value - a.value || a.index - b.index);
   }
-  async function search(pos, remaining, ply, alpha = -Infinity, beta = Infinity) {
-    check(); tick('search');
-    selectiveDepth = Math.max(selectiveDepth, ply);
-    const generated = await candidates(pos, ply);
-    if (!generated.items.length) return terminalValue(pos, ply);
-    const ranked = await rank(generated.items, ply + 1, sign(pos));
-    // Reuse the last iteration's best turn for ordering only. It cannot change
-    // candidate membership or exclude moves with a weak shallow model value.
-    const preferred = preferredActions.get(pos);
-    const preferredIndex = remaining > 1 ? ranked.findIndex(item => item.moves === preferred) : -1;
-    if (preferredIndex > 0) ranked.unshift(...ranked.splice(preferredIndex, 1));
-    let best = null;
-    let searched = 0, allLossesProven = true;
-    for (const candidate of ranked) {
-      check(false);
-      const child = candidate.terminal || (remaining === 1
-        ? { score: -candidate.value, pv: [], mateProven: false }
-        : await search(candidate.position, remaining - 1, ply + 1, -beta, -alpha));
-      const result = { score: -child.score, pv: [candidate.moves, ...child.pv], mateProven: child.mateProven };
-      searched++;
-      allLossesProven &&= result.score < -MATE_THRESHOLD && result.mateProven;
-      if (ply === 0) rootActionsSearched++;
-      if (!best || result.score > best.score) {
-        best = result;
-        if (ply === 0) rootPartial = { ...result, bestAction: candidate.moves };
+  function backup(node) {
+    for (let current = node; current; current = current.parent) {
+      const side = sign(current.position);
+      const evaluated = current.children?.filter(child => child.trueScore !== null) ?? [];
+      const best = evaluated.reduce((best, child) =>
+        !best || child.value * side > best.value * side ? child : best, null);
+      current.best = best;
+      if (!best) {
+        current.value = current.trueScore;
+        current.mateProven = Boolean(current.terminal?.mateProven);
+        continue;
       }
-      // A negative mate score is provisional until every legal alternative
-      // loses. Do not tighten the window or cut off on it: clamping an
-      // unproved losing mate after a cutoff would corrupt the returned bound.
-      if (result.score >= -MATE_THRESHOLD) {
-        alpha = Math.max(alpha, result.score);
-        if (alpha >= beta && searched < ranked.length) { cutoffs++; break; }
+      current.value = best.value;
+      current.mateProven = false;
+      if (Math.abs(current.value) > MATE_THRESHOLD) {
+        current.mateProven = current.value * side > 0 ? best.mateProven
+          : current.exhaustive && evaluated.length === current.children.length
+            && evaluated.every(child => child.value * side < -MATE_THRESHOLD && child.mateProven);
+        if (!current.mateProven) current.value = Math.sign(current.value) * (MATE_THRESHOLD - 1);
       }
     }
-    preferredActions.set(pos, best.pv[0]);
-    if (Math.abs(best.score) > MATE_THRESHOLD) {
-      // A winning mate needs one certified continuation; a losing mate needs
-      // every legal alternative. A capped or cut-off tree cannot prove a loss.
-      best.mateProven = best.score > 0 ? best.mateProven
-        : generated.exhaustive && searched === ranked.length && allLossesProven;
-      if (!best.mateProven) best.score = Math.sign(best.score) * (MATE_THRESHOLD - 1);
+  }
+  function publishRoot() {
+    if (!root.best) return;
+    score = root.value * rootSign;
+    mateProven = Math.abs(score) > MATE_THRESHOLD && root.mateProven;
+    pv = [];
+    for (let node = root.best; node; node = node.best) pv.push(node.moves);
+    bestAction = pv[0];
+    completed = true;
+    status = 'ok';
+  }
+  async function evaluateCandidate(node) {
+    searchingDepth = node.depth;
+    tick('search');
+    const terminal = probeTerminal(node.position, node.depth);
+    // The final component often already evaluated this exact submitted state.
+    // Reusing it avoids a duplicate model call without changing scheduling.
+    if (!terminal && !valueCache.has(node.position)) await infer([node.position]);
+    check(false);
+    node.terminal = terminal;
+    node.trueScore = terminal ? terminal.score * sign(node.position) : valueCache.get(node.position);
+    node.value = node.trueScore;
+    node.mateProven = Boolean(terminal?.mateProven);
+    trueEvaluations++;
+    if (node.depth === 1) rootActionsSearched++;
+    const previousDepth = depth;
+    depth = Math.max(depth, node.depth);
+    backup(node);
+    publishRoot();
+    if (depth > previousDepth || performance.now() - lastProgress >= 250) {
+      lastProgress = performance.now(); options.onProgress?.(snapshot());
     }
-    return best;
   }
   function snapshot() {
     const elapsedMs = Math.max(0, performance.now() - started);
     const whiteScore = score === null ? null : Math.round(score * rootSign);
+    const rankings = rankDepths(levels, rootSign);
+    const commonPrefix = Math.min(...rankings.map(level => level.searchedMoves));
     return {
       engine: 'transformer', bestAction, score: whiteScore, depth, nodes, searchNodes, generationNodes,
-      qnodes: 0, ttHits: 0, qTtHits: 0, cutoffs, elapsedMs: Math.round(elapsedMs),
+      qnodes: 0, ttHits: 0, qTtHits: 0, cutoffs: 0, elapsedMs: Math.round(elapsedMs),
       searchingDepth, rootActionsSearched, selectiveDepth,
       nps: elapsedMs ? Math.round(nodes * 1000 / elapsedMs) : 0, pv, status, completed,
       stoppedReason, tableEntries: 0, cacheMemoryBytes: 0,
-      searchPolicy: 'transformer-bounded-alpha-beta', candidateLimit, innerCandidateLimit,
+      searchPolicy: 'transformer-ranked-depth', candidateLimit, innerCandidateLimit,
+      trueEvaluations, pvDepth: pv.length,
+      expansionRank: Number.isFinite(commonPrefix) ? commonPrefix : null,
+      depthStats: rankings.map(level => ({
+        depth: level.depth, candidates: level.ranked.filter(node => node.trueScore === null).length,
+        trueEvaluations: level.ranked.filter(node => node.trueScore !== null).length,
+        searchedMoves: Number.isFinite(level.searchedMoves) ? level.searchedMoves : null,
+        topCandidateRank: level.candidate ? level.searchedMoves + 1 : null,
+      })),
       candidateCaps, candidateCacheEntries: candidateCache.size, evaluations, inferenceBatches, policyLeaves: 0, effectiveQuiescenceDepth: 0,
       mateProven, terminalProof: ['checkmate', 'stalemate'].includes(status) ? 'unrestricted-legal-exhaustion' : null,
       scoreType: score === null ? 'unavailable' : Math.abs(score) > MATE_THRESHOLD ? 'mate' : 'cp',
@@ -316,27 +364,31 @@ export async function analyze(position, options = {}) {
     };
   }
   try {
-    for (let currentDepth = 1; currentDepth <= maxDepth; currentDepth++) {
-      searchingDepth = currentDepth; rootActionsSearched = 0; rootPartial = null;
-      const result = await search(position, currentDepth, 0);
-      score = result.score; pv = result.pv; bestAction = pv[0] || null;
-      mateProven = Math.abs(score) > MATE_THRESHOLD && Boolean(result.mateProven);
-      depth = result.terminal ? 0 : currentDepth; completed = true;
-      status = result.terminal ? (score ? 'checkmate' : 'stalemate') : 'ok';
-      lastProgress = performance.now(); options.onProgress?.(snapshot());
-      check(false);
-      if (result.terminal) return snapshot();
-      if (result.mateProven && Math.abs(score) > MATE_THRESHOLD) { stoppedReason = 'mate'; break; }
+    await expand(root);
+    if (!root.children.length) {
+      const result = terminalValue(position, 0);
+      score = result.score; mateProven = Math.abs(score) > MATE_THRESHOLD && result.mateProven; completed = true;
+      bestAction = null; pv = [];
+      status = score ? 'checkmate' : 'stalemate';
+      stoppedReason = 'terminal';
+    } else {
+      while (true) {
+        check();
+        const work = chooseWork(rankDepths(levels, rootSign), { maxDepth });
+        if (!work) { stoppedReason = depth === maxDepth ? 'depth' : 'frontier'; break; }
+        if (work.kind === 'expand') await expand(work.node);
+        else await evaluateCandidate(work.node);
+        check(false);
+        if (mateProven) { stoppedReason = 'mate'; break; }
+      }
     }
-    stoppedReason ||= 'depth';
   } catch (error) {
     if (!(error instanceof SearchInterrupted)) throw error;
-    const fallback = rootPartial ?? rootFallback;
-    if (!completed && fallback) {
-      bestAction = fallback.bestAction; pv = fallback.pv;
-      // Partial iterations cannot certify a losing mate over unsearched moves.
-      score = fallback.score < -MATE_THRESHOLD ? -MATE_THRESHOLD + 1 : fallback.score;
-      mateProven = Math.abs(score) > MATE_THRESHOLD && Boolean(fallback.mateProven);
+    if (!completed && rootFallback) {
+      bestAction = rootFallback.bestAction; pv = rootFallback.pv;
+      // A partial root cannot certify a loss over unsearched alternatives.
+      score = rootFallback.score < -MATE_THRESHOLD ? -MATE_THRESHOLD + 1 : rootFallback.score;
+      mateProven = Math.abs(score) > MATE_THRESHOLD && Boolean(rootFallback.mateProven);
     }
   }
   return snapshot();

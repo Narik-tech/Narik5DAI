@@ -29,6 +29,8 @@ function engineIdleStatus() {
 
 function renderEngine() {
   const neural = selectedEngine() === 'transformer';
+  for (const option of $('search-depth').options) option.hidden = option.disabled = !neural && Number(option.value) > 16;
+  if (!neural && Number($('search-depth').value) > 16) $('search-depth').value = '16';
   const info = engines[selectedEngine()] || {};
   const device = typeof info.device === 'string' ? ` · ${info.device}` : '';
   $('engine-readiness').textContent = neural
@@ -339,6 +341,7 @@ function renderResourceStats(result) {
 function renderAnalysis() {
   const result = search?.result || search?.progress;
   const running = search?.status === 'running';
+  const rankedDepth = result?.searchPolicy === 'transformer-ranked-depth';
   const score = result?.score;
   $('search-status').textContent = running ? 'SEARCHING' : result?.stoppedReason === 'cancelled' || search?.status === 'cancelled' ? 'STOPPED' : search?.status === 'done' ? result?.completed ? 'COMPLETE' : 'PARTIAL' : search?.status === 'error' ? 'ERROR' : engineIdleStatus();
   $('search-status').classList.toggle('searching',running);
@@ -347,18 +350,24 @@ function renderAnalysis() {
   $('eval-label').textContent = Number.isFinite(score) ? result?.status === 'checkmate' ? `${sideLabel()} is checkmated` : result?.status === 'stalemate' ? 'Stalemate' : isMate ? `${score >= 0 ? 'White' : 'Black'} has a mating line` : Math.abs(score) < 20 ? 'Approximately equal' : `${score > 0 ? 'White' : 'Black'} is favored` : running ? 'Exploring possible continuations…' : search?.result ? 'Evaluation unavailable' : 'Run an analysis to evaluate';
   $('evaluation-fill').style.height = `${Number.isFinite(score) ? 50 + 47 * Math.tanh(score / 600) : 50}%`;
   $('stat-depth').textContent = result?.depth ?? '—';
-  $('stat-depth').title = result ? `Completed full-turn depth: ${result.depth ?? 0}. Deepest visited turn: ${result.selectiveDepth ?? result.depth ?? 0}. Capture extension depth: ${result.effectiveQuiescenceDepth ?? 0}.` : 'Deepest fully completed full-turn search';
+  $('stat-depth').title = result ? rankedDepth
+    ? `Deepest true evaluation: ${result.depth ?? 0} turns. Current best line: ${result.pvDepth ?? result.pv?.length ?? 0} turns. Deepest generated or probed turn: ${result.selectiveDepth ?? result.depth ?? 0}.`
+    : `Completed full-turn depth: ${result.depth ?? 0}. Deepest visited turn: ${result.selectiveDepth ?? result.depth ?? 0}. Capture extension depth: ${result.effectiveQuiescenceDepth ?? 0}.`
+    : selectedEngine() === 'transformer' ? 'Deepest true evaluation in complete turns' : 'Deepest fully completed full-turn search';
   $('stat-nodes').textContent = compactNumber(result?.nodes);
   $('stat-nodes').title = result ? `${(result.nodes ?? 0).toLocaleString()} search and generation work nodes` : 'Search and generation work nodes';
   $('stat-nps').textContent = compactNumber(result?.nps);
   $('stat-time').textContent = Number.isFinite(result?.elapsedMs) ? `${(result.elapsedMs / 1000).toFixed(1)}s` : '—';
   renderResourceStats(result);
   let note = running && result ? `Searching depth ${result.searchingDepth ?? result.depth} · ${result.rootActionsSearched ?? 0} root turns compared` : !running && result?.stoppedReason === 'policy' ? 'Legal turns exist, but none satisfy the search restriction on optional boards. Play a turn manually.' : !running && result?.stoppedReason === 'nodes' ? 'Node limit reached. Increase Max nodes to search further within your think time.' : !running && search?.result && !result.completed ? Number.isFinite(score) ? 'Partial search; no full depth completed. Allow more think time for a deeper comparison.' : result.bestAction ? 'A legal fallback is available. Allow more think time to evaluate alternatives.' : 'No recommendation is available within the search limits.' : '';
+  if (rankedDepth && !running && !result.completed && result.stoppedReason !== 'nodes') {
+    note = result.bestAction ? 'A legal fallback is available; no root turn has a true evaluation yet. Allow more think time to compare continuations.' : 'No recommendation is available within the search limits.';
+  }
   if (search?.engine === 'transformer' && result) {
     const candidateLimit = result.candidateLimit ?? result.limits?.candidateLimit;
     const innerCandidateLimit = result.innerCandidateLimit ?? result.limits?.innerCandidateLimit;
     const alphaBeta = result.searchPolicy === 'transformer-bounded-alpha-beta';
-    const legacyBeamWidth = alphaBeta ? null : result.beamWidth ?? result.limits?.beamWidth;
+    const legacyBeamWidth = alphaBeta || rankedDepth ? null : result.beamWidth ?? result.limits?.beamWidth;
     const tokenLimit = result.model?.config?.max_tokens;
     let candidateScope = 'candidate turns are capped';
     if (Number.isFinite(candidateLimit)) {
@@ -366,7 +375,12 @@ function renderAnalysis() {
         ? candidateLimit === innerCandidateLimit ? `up to ${candidateLimit} candidate turns per position` : `up to ${candidateLimit} root / ${innerCandidateLimit} reply candidate turns`
         : `up to ${candidateLimit} root candidate turns`;
     }
-    const details = [`${alphaBeta ? 'Transformer alpha-beta search' : 'Selective transformer search'}; ${candidateScope}${Number.isFinite(legacyBeamWidth) ? `; best ${legacyBeamWidth} deepened` : ''}.`];
+    const details = [`${rankedDepth ? 'Transformer ranked depth search' : alphaBeta ? 'Transformer alpha-beta search' : 'Selective transformer search'}; ${candidateScope}${Number.isFinite(legacyBeamWidth) ? `; best ${legacyBeamWidth} deepened` : ''}.`];
+    if (rankedDepth) {
+      if (Number.isFinite(result.expansionRank)) details.push(`Shared evaluated ranks: ${result.expansionRank}.`);
+      const depths = (result.depthStats || []).filter(item => item.candidates > 0 || item.trueEvaluations > 0);
+      if (depths.length) details.push(`Searched moves by depth: ${depths.map(item => `${item.depth}: ${item.searchedMoves === null ? 'no candidates' : item.searchedMoves}`).join(' · ')}.`);
+    }
     if (Number.isFinite(tokenLimit)) details.push(`Model context: ${tokenLimit} tokens.`);
     if (result.contextTruncated) details.push('Historical context was truncated for the model. Full history still determines legality.');
     if (result.frontierTruncated) details.push('The position exceeds model context; some current-board features were omitted.');
