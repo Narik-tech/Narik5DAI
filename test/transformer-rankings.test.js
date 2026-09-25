@@ -61,6 +61,43 @@ test('live rank snapshots show a Candidate overtaking the former True leader aft
   assert.deepEqual(result.bestAction, favorite.moves, 'a live heuristic leader must not replace the playable True result');
 });
 
+test('deeper rank snapshots follow the current parent ranking before comparing sibling scores', async () => {
+  const evaluateBatch = async positions => positions.map(position => {
+    let hash = 2166136261;
+    for (const char of positionKey(position)) hash = Math.imul(hash ^ char.charCodeAt(0), 16777619);
+    return ((hash >>> 0) % 2001) - 1000;
+  });
+  for (const position of [createPosition(), createPosition({ pgn: '1. e4' })]) {
+    const result = await analyze(position, { ...limits, candidateLimit: 3, innerCandidateLimit: 3, evaluateBatch });
+    assert.equal(result.stoppedReason, 'depth');
+    assert.equal(result.rankings.length, 3);
+    let scoreInversion = false;
+    for (const [index, level] of result.rankings.entries()) {
+      if (!index) continue;
+      const parentDepth = level.depth - 1;
+      const parents = new Map(result.rankings[index - 1].entries.map(entry => [
+        JSON.stringify(entry.line.slice(0, parentDepth)), entry.rank,
+      ]));
+      let previous = null;
+      const side = level.side === 'white' ? 1 : -1;
+      for (const entry of level.entries) {
+        const parentRank = parents.get(JSON.stringify(entry.line.slice(0, parentDepth)));
+        assert.notEqual(parentRank, undefined, 'this bounded tree exposes every immediate parent');
+        if (previous) {
+          assert.ok(parentRank >= previous.parentRank, 'a lower-ranked parent cannot jump ahead on its child score');
+          if (parentRank === previous.parentRank) assert.ok(side * previous.score >= side * entry.score);
+          else scoreInversion ||= side * previous.score < side * entry.score;
+        }
+        previous = { parentRank, score: entry.score };
+      }
+      assert.deepEqual(level.entries[0].line.slice(0, parentDepth),
+        result.rankings[index - 1].entries[0].line.slice(0, parentDepth),
+        'the leading continuation follows the leading parent at each depth');
+    }
+    assert.equal(scoreInversion, true, 'parent priority must actually override the global score order');
+  }
+});
+
 test('progress continues at the 100ms cadence while the next inference batch is pending', async t => {
   let now = 0, batches = 0, stop = false;
   t.mock.method(performance, 'now', () => now);

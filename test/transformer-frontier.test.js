@@ -28,6 +28,56 @@ test('equal values retain deterministic insertion order without mutating level a
   assert.deepEqual(level, [third, first, second]);
 });
 
+test('later depths prioritize the current parent rank before sibling scores for either root color', () => {
+  const first = node(1, 0, 100, 100), second = node(1, 1, 50, 50);
+  const firstLow = node(2, 2, -20, null, { parent: first });
+  const firstHigh = node(2, 3, 20, 20, { parent: first });
+  const secondLow = node(2, 4, -10000, -10000, { parent: second });
+  const secondHigh = node(2, 5, 10000, null, { parent: second });
+  const levels = [[], [second, first], [secondLow, firstHigh, secondHigh, firstLow]];
+  assert.deepEqual(ranked(levels)[1].ranked, [firstLow, firstHigh, secondLow, secondHigh],
+    'White prefers the first parent; Black replies sort by increasing score within each parent');
+  assert.deepEqual(ranked(levels, -1)[1].ranked, [secondHigh, secondLow, firstHigh, firstLow],
+    'Black prefers the second parent; White replies sort by decreasing score within each parent');
+});
+
+test('parent priority propagates recursively and reranks descendants after backed values change', () => {
+  const first = node(1, 0, 100, 100), second = node(1, 1, 50, 50);
+  const firstReply = node(2, 2, -20, -20, { parent: first });
+  const secondReply = node(2, 3, 20, 20, { parent: first });
+  const otherReply = node(2, 4, -1000, -1000, { parent: second });
+  const firstLow = node(3, 5, 10, null, { parent: firstReply });
+  const firstHigh = node(3, 6, 30, null, { parent: firstReply });
+  const secondChild = node(3, 7, 1000, null, { parent: secondReply });
+  const otherChild = node(3, 8, 10000, null, { parent: otherReply });
+  const levels = [[], [first, second], [firstReply, secondReply, otherReply],
+    [otherChild, secondChild, firstLow, firstHigh]];
+  assert.deepEqual(ranked(levels)[2].ranked, [firstHigh, firstLow, secondChild, otherChild]);
+  firstReply.value = 40;
+  assert.deepEqual(ranked(levels)[2].ranked, [secondChild, firstHigh, firstLow, otherChild],
+    'a changed depth-two parent rank immediately changes depth-three priority');
+  first.value = 0;
+  const reranked = ranked(levels);
+  assert.deepEqual(reranked[1].ranked, [otherReply, secondReply, firstReply]);
+  assert.deepEqual(reranked[2].ranked, [otherChild, secondChild, firstHigh, firstLow],
+    'a changed root parent rank propagates through all later depths');
+});
+
+test('the ranked True prefix and chosen work follow parent priority', () => {
+  const first = node(1, 0, 100, 100, { children: [] });
+  const second = node(1, 1, 50, 50, { children: [] });
+  const leadingCandidate = node(2, 2, 1000, null, { parent: first });
+  const otherTrue = node(2, 3, -1000, -1000, { parent: second });
+  const levels = [[], [first, second], [otherTrue, leadingCandidate]];
+  assert.equal(ranked(levels)[1].searchedMoves, 0,
+    'a True evaluation under a lower-ranked parent does not extend the prefix');
+  assert.deepEqual(choose(levels), { kind: 'evaluate', node: leadingCandidate });
+  first.value = 0;
+  assert.equal(ranked(levels)[1].searchedMoves, 1);
+  assert.deepEqual(choose(levels), { kind: 'expand', node: otherTrue },
+    'after its parent takes the lead, the True continuation is eligible for expansion');
+});
+
 test('Searched Moves counts only the True prefix and changes when scores are backed up', () => {
   const strongest = node(1, 0, 90, 90);
   const candidate = node(1, 1, 80);
@@ -192,6 +242,21 @@ test('dynamic readiness uses current rankings after backed scores change', () =>
     'a True value falling below the leading Candidate reduces the current prefix');
   level[0].value = level[0].trueScore;
   assert.equal(canDeepen(ranked([[], level]), 1), true);
+});
+
+test('dynamic readiness uses the hierarchical prefix and responds to parent rank changes', () => {
+  const first = node(1, 0, 100, 100), second = node(1, 1, 50, 50);
+  const trueChildren = Array.from({ length: 20 }, (_, index) =>
+    node(2, index + 2, 1000 + index, 1000 + index, { parent: first }));
+  const candidate = node(2, 22, -1000, null, { parent: second });
+  const levels = [[], [first, second], [candidate, ...trueChildren]];
+  assert.equal(ranked(levels)[1].searchedMoves, 20);
+  assert.equal(canDeepen(ranked(levels), 2), true,
+    'twenty True continuations of the higher-ranked parent satisfy readiness');
+  first.value = 0;
+  assert.equal(ranked(levels)[1].searchedMoves, 0);
+  assert.equal(canDeepen(ranked(levels), 2), false,
+    'twenty existing True evaluations do not suffice after a pending parent takes priority');
 });
 
 test('short exhausted depths count as ready when all their available entries are True', () => {

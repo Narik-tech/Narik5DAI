@@ -74,11 +74,20 @@ complete-turn depth. It distinguishes two kinds of evaluation:
   in that position. Candidate-only continuations do not replace its True value.
   Proven terminal outcomes override neural scores.
 
-At each depth, Candidate and resolved True Evaluations share a ranking from
-strongest to weakest for the player making that depth's turn. **Searched Moves**
-counts the consecutive True Evaluations ahead of the first Candidate Evaluation.
-Rankings and their prefix counts are recomputed as continuation values propagate
-back through the tree.
+At each depth, Candidate and resolved True Evaluations share a ranking. At
+depth 1, moves rank strongest to weakest for the player making that turn.
+At later depths, continuations of a higher-ranked parent move come first;
+continuations sharing a parent rank by their own evaluation for the mover.
+For example, all generated replies to the first-ranked depth-1 move precede
+replies to the second-ranked move. Depth 3 follows the resulting depth-2 parent
+order, and this priority continues through the tree. As backed-up values change
+parent rankings, their continuation groups move with them.
+
+**Searched Moves** counts the consecutive True Evaluations ahead of the first
+Candidate Evaluation in this order. Rankings and their prefix counts are
+recomputed as continuation values propagate back through the tree. The search
+scheduler, dynamic-depth readiness check, and displayed depth tabs all use the
+same order.
 
 The scheduler repeats the following while time and work remain:
 

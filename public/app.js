@@ -371,7 +371,7 @@ function renderRankings(result) {
   $('ranking-panel').setAttribute('aria-labelledby', `ranking-tab-${selectedRankingDepth}`);
   const level = visibleRankings.find(item => item.depth === selectedRankingDepth), entries = level.entries.slice(0, 10);
   const side = level.side === 'black' ? 'Black' : 'White';
-  setText($('ranking-summary'), `Showing ${entries.length} of ${level.total ?? level.entries.length} · ${side} to move · scores for White`);
+  setText($('ranking-summary'), `Showing ${entries.length} of ${level.total ?? level.entries.length} · ${side} to move · scores for White${level.depth > 1 ? ' · Higher-ranked parent moves first' : ''}`);
   const wantedRows = entries.map(entry => {
     const key = `${level.depth}:${entry.id}`;
     let row = rankingRows.get(key);

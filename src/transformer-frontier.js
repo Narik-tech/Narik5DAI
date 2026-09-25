@@ -3,11 +3,18 @@
 export const DYNAMIC_DEPTH_THRESHOLD = 20;
 
 export function rankDepths(levels, rootSign) {
+  const ranksByDepth = [];
   return levels.flatMap((nodes, depth) => {
     if (!depth || !nodes?.length) return [];
     const side = depth % 2 ? rootSign : -rootSign;
     const value = node => node.trueScore === null ? node.candidateScore : node.value;
-    const ranked = nodes.slice().sort((a, b) => side * (value(b) - value(a)) || a.index - b.index);
+    // Favor continuations of the current higher-ranked parent before comparing
+    // their own scores. Rebuilding these ranks propagates backed-up changes
+    // through every later depth, while depth one retains score-only ordering.
+    const parentRank = node => ranksByDepth[depth - 1]?.get(node.parent) ?? Infinity;
+    const ranked = nodes.slice().sort((a, b) => parentRank(a) - parentRank(b)
+      || side * (value(b) - value(a)) || a.index - b.index);
+    ranksByDepth[depth] = new Map(ranked.map((node, index) => [node, index]));
     const firstCandidate = ranked.findIndex(node => node.trueScore === null);
     return [{ depth, ranked, searchedMoves: firstCandidate < 0 ? Infinity : firstCandidate,
       candidate: firstCandidate < 0 ? null : ranked[firstCandidate] }];

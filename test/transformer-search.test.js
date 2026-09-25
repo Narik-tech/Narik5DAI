@@ -284,14 +284,16 @@ test('locked-king search deepens without spending its budget proving every shall
   const position = createPosition({ pgn: '[Board "custom"]\n[k7/pn6/K7/8/8/8/6PB/8:0:1:w]' });
   const before = positionKey(position);
   let stop = false;
-  const result = await analyze(position, { ...limits, maxNodes: 50000, maxDepth: 12,
-    evaluateBatch: async positions => positions.map(fractionalValue),
+  // Equal scores isolate terminal-probe work from parent-rank changes that
+  // redirect the search. Unbounded shallow probes exceed this work budget.
+  const result = await analyze(position, { ...limits, maxNodes: 10000, maxDepth: 12,
+    evaluateBatch: zero,
     shouldStop: () => stop,
     onProgress: report => { if (report.depth >= 6) stop = true; },
   });
   assert.equal(result.depth, 6);
   assert.equal(result.stoppedReason, 'cancelled');
-  assert(result.nodes < 50000, 'terminal proofs for unselected candidates must not consume the work budget');
+  assert(result.nodes < 10000, 'terminal proofs for unselected candidates must not consume the work budget');
   assert.equal(positionKey(position), before);
   validatePv(position, result);
 });
