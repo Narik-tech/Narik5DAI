@@ -2,6 +2,12 @@
 // A cached shallow value becomes True only when the scheduler selects it.
 export const DYNAMIC_DEPTH_THRESHOLD = 20;
 
+function describeDepth(depth, ranked) {
+  const firstCandidate = ranked.findIndex(node => node.trueScore === null);
+  return { depth, ranked, searchedMoves: firstCandidate < 0 ? Infinity : firstCandidate,
+    candidate: firstCandidate < 0 ? null : ranked[firstCandidate] };
+}
+
 export function rankDepths(levels, rootSign) {
   const ranksByDepth = [];
   return levels.flatMap((nodes, depth) => {
@@ -15,9 +21,7 @@ export function rankDepths(levels, rootSign) {
     const ranked = nodes.slice().sort((a, b) => parentRank(a) - parentRank(b)
       || side * (value(b) - value(a)) || a.index - b.index);
     ranksByDepth[depth] = new Map(ranked.map((node, index) => [node, index]));
-    const firstCandidate = ranked.findIndex(node => node.trueScore === null);
-    return [{ depth, ranked, searchedMoves: firstCandidate < 0 ? Infinity : firstCandidate,
-      candidate: firstCandidate < 0 ? null : ranked[firstCandidate] }];
+    return [describeDepth(depth, ranked)];
   });
 }
 
@@ -32,6 +36,47 @@ export function canDeepen(rankings, maxDepth) {
 
 export function chooseWork(rankings, { maxDepth }) {
   const active = rankings.filter(level => level.depth <= maxDepth);
+  const continuations = new Map();
+  function continuation(node) {
+    if (!continuations.has(node)) {
+      const next = node.best ? continuation(node.best) : { length: 0, tip: node };
+      continuations.set(node, { length: next.length + 1, tip: next.tip });
+    }
+    return continuations.get(node);
+  }
+  const shortLines = [];
+  for (const level of active) {
+    for (let rank = 1; rank < level.ranked.length; rank++) {
+      const node = level.ranked[rank], line = continuation(node);
+      // Include the route from the root, matching "Full continuation" in the UI.
+      const length = node.depth - 1 + line.length;
+      const previousLength = level.depth - 1 + continuation(level.ranked[rank - 1]).length;
+      if (length * 2 >= previousLength || length >= maxDepth
+        || node.mateProven || line.tip.terminal || line.tip.mateProven) continue;
+      shortLines.push({ node, rank });
+    }
+  }
+  shortLines.sort((a, b) => a.rank - b.rank || a.node.depth - b.node.depth);
+  for (const { node } of shortLines) {
+    const branch = new Set(), pending = [node];
+    while (pending.length) {
+      const current = pending.pop();
+      branch.add(current);
+      if (current.depth < maxDepth && current.children) pending.push(...current.children);
+    }
+    const scoped = active.flatMap(level => {
+      const ranked = level.ranked.filter(entry => branch.has(entry));
+      return ranked.length ? [describeDepth(level.depth, ranked)] : [];
+    });
+    // Recompute the prefix inside this branch so a stronger parent elsewhere
+    // cannot starve it. Use normal scheduling locally, without nested overrides.
+    const work = chooseRankedWork(scoped, maxDepth);
+    if (work) return work;
+  }
+  return chooseRankedWork(active, maxDepth);
+}
+
+function chooseRankedWork(active, maxDepth) {
   // The shortest common evaluated prefix determines the currently eligible
   // ranks. Exhausted depths have no candidate left to delay another expansion.
   const commonPrefix = Math.min(...active.map(level => level.searchedMoves));
