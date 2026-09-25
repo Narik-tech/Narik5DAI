@@ -141,7 +141,7 @@ export function createApp({ transformerRuntime = new TransformerRuntime(), train
           const options = {
             engine,
             timeMs: numericOption(body.timeMs, 3000, 50, 120000, 'Think time'),
-            maxDepth: numericOption(body.maxDepth, 8, 1, engine === 'transformer' ? 64 : 16, 'Depth'),
+            maxDepth: numericOption(body.maxDepth, 8, engine === 'transformer' ? 0 : 1, engine === 'transformer' ? 64 : 16, 'Depth'),
             maxNodes: numericOption(body.maxNodes, 2000000, 1, 1000000000, 'Node budget'),
             threads: numericOption(body.threads, 1, 1, 16, 'Search threads'),
             cacheMemoryMb: numericOption(body.cacheMemoryMb, 128, 0, 4096, 'Cache memory'),

@@ -89,10 +89,13 @@ test('inference error is surfaced, never converted into a classical result', asy
   assert.equal(job.result, undefined);
 });
 
-test('transformer accepts deeper depth while classical retains its depth cap', async t => {
+test('transformer accepts dynamic and deeper depth while classical retains its depth range', async t => {
   const { request, wait } = await fixture(t, mockRuntime());
   for (const body of [
     { engine: 'transformer', maxDepth: 65 },
+    { engine: 'transformer', maxDepth: -1 },
+    { engine: 'classical', maxDepth: 0 },
+    { engine: 'classical', maxDepth: -1 },
     { engine: 'classical', maxDepth: 17 },
   ]) assert.equal((await request('/api/analyze', body)).status, 400, JSON.stringify(body));
   const created = await request('/api/analyze', { engine: 'transformer', timeMs: 1000, maxNodes: 1, maxDepth: 64 });
@@ -100,6 +103,14 @@ test('transformer accepts deeper depth while classical retains its depth cap', a
   const job = await wait(created.data.jobId);
   assert.equal(job.status, 'done', job.error);
   assert.equal(job.result.limits.maxDepth, 64);
+  const dynamic = await request('/api/analyze', { engine: 'transformer', timeMs: 1000, maxNodes: 1, maxDepth: 0 });
+  assert.equal(dynamic.status, 202, dynamic.data.error);
+  const dynamicJob = await wait(dynamic.data.jobId);
+  assert.equal(dynamicJob.status, 'done', dynamicJob.error);
+  assert.equal(dynamicJob.result.limits.maxDepth, 0);
+  assert.equal(dynamicJob.result.depthMode, 'dynamic');
+  assert.equal(dynamicJob.result.currentMaxDepth, 1);
+  assert.equal(dynamicJob.result.dynamicDepthThreshold, 20);
 });
 
 test('model loading cannot attach a search to a position that changed while loading', async t => {

@@ -37,7 +37,7 @@ Continuous shortcut: npm run transformer:selfplay:continuous
   --game-concurrency N Concurrent self-play games, 1..8; shared model (1)
   --plies N            Self-play turn cap (40)
   --nodes N            Per-turn search work (20000)
-  --depth N            Neural search depth (2)
+  --depth N            Neural depth 1..64; 0 grows dynamically (default 2)
   --time-ms N          Per-turn search/terminal safety cap (3000)
   --terminal-work N    Full-rules terminal verification budget (20000)
   --exploration X      Random legal-turn probability in early play (0.2)
@@ -87,7 +87,7 @@ export function parseArguments(args, initialOptions = defaults) {
   }
   for (const [name, min, max] of [
     ['iterations', 0, 1000000], ['games', 1, 128], ['gameConcurrency', 1, 8], ['maxPlies', 1, 256], ['maxNodes', 1, 10000000],
-    ['maxDepth', 1, 64], ['timeMs', 1, 60000], ['terminalWork', 1, 10000000], ['explorationPlies', 0, 256],
+    ['maxDepth', 0, 64], ['timeMs', 1, 60000], ['terminalWork', 1, 10000000], ['explorationPlies', 0, 256],
     ['steps', 1, 1000000], ['batchSize', 1, 128], ['replaySize', 1, 100000], ['seed', 0, 0xffffffff],
     ['arenaPairs', 1, 128], ['arenaConcurrency', 1, 8], ['minPairs', 1, 128], ['arenaPlies', 1, 256], ['keepIterations', 1, 100],
   ]) if (!Number.isSafeInteger(options[name]) || options[name] < min || options[name] > max) throw new Error(`Invalid ${name}: expected integer ${min}..${max}.`);

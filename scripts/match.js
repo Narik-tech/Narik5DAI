@@ -34,11 +34,15 @@ export function certifyTerminal(position, { terminalWork = defaults.terminalWork
 
 function limitsFor(options) {
   const limits = { ...defaults, ...options };
+  // Zero is the transformer's dynamic horizon. Classical match callers keep
+  // the normal positive-depth contract unless they explicitly select that engine.
+  const minimumDepth = options.engine === 'transformer' ? 0 : 1;
   for (const [name, min, max] of [
-    ['maxNodes', 0, 1e9], ['maxPlies', 0, 10000], ['maxDepth', 1, 64],
+    ['maxNodes', 0, 1e9], ['maxPlies', 0, 10000], ['maxDepth', minimumDepth, 64],
     ['quiescenceDepth', 0, 8], ['timeMs', 1, 3600000], ['terminalWork', 0, 1e9],
   ]) if (!Number.isInteger(limits[name]) || limits[name] < min || limits[name] > max) throw new Error(`Invalid ${name}.`);
-  return Object.fromEntries(Object.keys(defaults).map(key => [key, limits[key]]));
+  return { ...Object.fromEntries(Object.keys(defaults).map(key => [key, limits[key]])),
+    ...(options.engine === 'transformer' ? { engine: 'transformer' } : {}) };
 }
 
 function recordSearch(result) {

@@ -155,6 +155,12 @@ if you want to preserve an earlier check's copied checkpoint.
 | Retention | Latest 5 iteration folders, replay, latest report and previous model |
 
 See all options with `node scripts/transformer-selfplay.js --help`.
+`--depth 0` enables dynamic depth for both self-play and arena games. Each search
+starts with a ceiling of one turn and raises it by one when every searched
+depth's leading 20 entries are True Evaluations, or all entries are True when
+fewer than 20 exist. The ceiling can grow to 64 under the same per-turn time and
+work limits. The training screen's **Search depth** setting also accepts zero.
+
 `--plies` counts submitted full player turns, including turns requiring moves
 on multiple boards. Exploration samples from a bounded prefix of up to 32 legal
 complete turns; it is not uniform over the entire 5D action space. Seeds control

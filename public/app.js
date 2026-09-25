@@ -32,7 +32,8 @@ function engineIdleStatus() {
 
 function renderEngine() {
   const neural = selectedEngine() === 'transformer';
-  for (const option of $('search-depth').options) option.hidden = option.disabled = !neural && Number(option.value) > 16;
+  for (const option of $('search-depth').options) option.hidden = option.disabled = !neural && (Number(option.value) === 0 || Number(option.value) > 16);
+  if (!neural && Number($('search-depth').value) === 0) $('search-depth').value = '4';
   if (!neural && Number($('search-depth').value) > 16) $('search-depth').value = '16';
   const info = engines[selectedEngine()] || {};
   const device = typeof info.device === 'string' ? ` · ${info.device}` : '';
@@ -439,6 +440,7 @@ function renderAnalysis() {
     ? `Deepest true evaluation: ${result.depth ?? 0} turns. Current best line: ${result.pvDepth ?? result.pv?.length ?? 0} turns. Deepest generated or probed turn: ${result.selectiveDepth ?? result.depth ?? 0}.`
     : `Completed full-turn depth: ${result.depth ?? 0}. Deepest visited turn: ${result.selectiveDepth ?? result.depth ?? 0}. Capture extension depth: ${result.effectiveQuiescenceDepth ?? 0}.`
     : selectedEngine() === 'transformer' ? 'Deepest true evaluation in complete turns' : 'Deepest fully completed full-turn search';
+  if (result?.depthMode === 'dynamic') $('stat-depth').title += ` Dynamic mode; current depth ceiling: ${result.currentMaxDepth ?? 1} turns.`;
   $('stat-nodes').textContent = compactNumber(result?.nodes);
   $('stat-nodes').title = result ? `${(result.nodes ?? 0).toLocaleString()} search and generation work nodes` : 'Search and generation work nodes';
   $('stat-nps').textContent = compactNumber(result?.nps);
@@ -462,6 +464,7 @@ function renderAnalysis() {
     }
     const details = [`${rankedDepth ? 'Transformer ranked depth search' : alphaBeta ? 'Transformer alpha-beta search' : 'Selective transformer search'}; ${candidateScope}${Number.isFinite(legacyBeamWidth) ? `; best ${legacyBeamWidth} deepened` : ''}.`];
     if (rankedDepth) {
+      if (result.depthMode === 'dynamic') details.push(`Dynamic depth; current ceiling: ${result.currentMaxDepth ?? 1} turns. The top ${result.dynamicDepthThreshold ?? 20} ranks at every searched depth must be True before the ceiling increases (all ranks if fewer exist).`);
       if (Number.isFinite(result.expansionRank)) details.push(`Shared evaluated ranks: ${result.expansionRank}.`);
       const depths = (result.depthStats || []).filter(item => item.candidates > 0 || item.trueEvaluations > 0);
       if (depths.length) details.push(`Searched moves by depth: ${depths.map(item => `${item.depth}: ${item.searchedMoves === null ? 'no candidates' : item.searchedMoves}`).join(' · ')}.`);
@@ -583,10 +586,10 @@ for (const id of resourceSettingIds) $(id).addEventListener('change', () => {
   scheduleOpponent();
 });
 $('engine-select').addEventListener('change', async () => {
-  saveSearchSettings();
   autoRevision = null;
   setBusy(true);
   renderEngine();
+  saveSearchSettings();
   try { await invalidateSearch(); }
   finally { setBusy(false); scheduleOpponent(); }
 });

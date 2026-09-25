@@ -12,7 +12,7 @@ Usage: node src/cli.js [options]
   --variant NAME    Starting variant, default: standard
   --engine NAME     classical (default) or transformer (requires trained model)
   --time SECONDS    Think time, default: 5 (maximum 3600)
-  --depth NUMBER    Maximum complete-turn plies, default: 8
+  --depth NUMBER    Maximum complete-turn plies, default: 8; transformer 0 is dynamic
   --nodes NUMBER    Search + generation work budget, default: 2000000
   --threads NUMBER  Classical search CPU threads, default: 1 (maximum 16)
   --qdepth NUMBER   Quiescence turn depth, default: 2
@@ -59,7 +59,7 @@ async function main() {
   const options = {
     engine: args.engine || 'classical',
     timeMs: Math.round(seconds * 1000),
-    maxDepth: integer(args.depth, 8, 1, 64, '--depth'),
+    maxDepth: integer(args.depth, 8, args.engine === 'transformer' ? 0 : 1, 64, '--depth'),
     maxNodes: integer(args.nodes, 2000000, 1, 1000000000, '--nodes'),
     threads: integer(args.threads, 1, 1, 16, '--threads'),
     quiescenceDepth: integer(args.qdepth, 2, 0, 8, '--qdepth'),

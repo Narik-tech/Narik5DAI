@@ -117,10 +117,10 @@ export async function evaluateCandidate({ candidate, incumbent, suite, pairs: re
   integer('gameConcurrency', gameConcurrency, 1, 8);
   integer('seed', seed, 0, 0xffffffff);
   for (const [name, value, minimum, maximum] of [
-    ['maxPlies', maxPlies, 0, 10000], ['maxNodes', maxNodes, 0, 1e9], ['maxDepth', maxDepth, 1, 64],
+    ['maxPlies', maxPlies, 0, 10000], ['maxNodes', maxNodes, 0, 1e9], ['maxDepth', maxDepth, 0, 64],
     ['timeMs', timeMs, 1, 3600000], ['terminalWork', terminalWork, 0, 1e9],
   ]) integer(name, value, minimum, maximum);
-  const limits = { maxPlies, maxNodes, maxDepth, timeMs, terminalWork, quiescenceDepth: 0, playOnTimeLimit: true };
+  const limits = { engine: 'transformer', maxPlies, maxNodes, maxDepth, timeMs, terminalWork, quiescenceDepth: 0, playOnTimeLimit: true };
   let cancellation = null, failed = false, failure;
   function fail(error) {
     if (!failed) { failed = true; failure = error; }

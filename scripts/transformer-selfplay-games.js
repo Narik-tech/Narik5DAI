@@ -13,7 +13,7 @@ function settings(options) {
   const limits = { games: 8, gameConcurrency: 1, seed: 5, maxPlies: 40, timeMs: 1000, maxNodes: 20000, maxDepth: 2,
     terminalWork: 20000, exploration: 0.15, explorationPlies: 8, outcomeWeight: 0.5, ...options };
   for (const [name, low, high] of [['games', 1, 10000], ['gameConcurrency', 1, 8], ['seed', 0, 0xffffffff], ['maxPlies', 0, 10000],
-    ['timeMs', 1, 60000], ['maxNodes', 0, 1e9], ['maxDepth', 1, 64], ['terminalWork', 0, 1e9], ['explorationPlies', 0, 10000]]) {
+    ['timeMs', 1, 60000], ['maxNodes', 0, 1e9], ['maxDepth', 0, 64], ['terminalWork', 0, 1e9], ['explorationPlies', 0, 10000]]) {
     if (!Number.isInteger(limits[name]) || limits[name] < low || limits[name] > high) throw new Error(`Invalid ${name}.`);
   }
   for (const name of ['exploration', 'outcomeWeight']) {
@@ -64,7 +64,7 @@ export async function generateSelfPlayGames(options = {}) {
     check();
     let timer, localStop = false;
     // The search owns its advertised time budget. A small transport grace lets
-    // it return its last completed iteration before a stalled callback is cut
+    // it return its latest backed-up result before a stalled callback is cut
     // off. Late results touch only the callback's isolated input copy.
     const deadline = performance.now() + limits.timeMs + 1000;
     const interrupted = new Promise((resolve, reject) => {

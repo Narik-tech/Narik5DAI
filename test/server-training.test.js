@@ -107,7 +107,7 @@ test('training HTTP flow applies editable parameters, reports progress and accep
   assert.equal(initial.data.defaults.arenaConcurrency, 1);
   assert.deepEqual(initial.data.iterations, []);
   const started = await request('/api/training/start', { options: {
-    iterations: 2, games: 3, gameConcurrency: 2, arenaConcurrency: 4, steps: 17, batchSize: 4, learningRate: 0.002, device: 'cpu',
+    iterations: 2, games: 3, gameConcurrency: 2, arenaConcurrency: 4, steps: 17, batchSize: 4, learningRate: 0.002, device: 'cpu', maxDepth: 0,
   } });
   assert.equal(started.status, 202, started.data.error);
   assert.equal(invocations.length, 1);
@@ -115,6 +115,7 @@ test('training HTTP flow applies editable parameters, reports progress and accep
   assert.equal(invocations[0].options.gameConcurrency, 2);
   assert.equal(invocations[0].options.arenaConcurrency, 4);
   assert.equal(invocations[0].options.learningRate, 0.002);
+  assert.equal(invocations[0].options.maxDepth, 0, 'Dynamic depth reaches the training worker unchanged.');
   assert.equal((await request('/api/training/start', { options: {} })).status, 409);
   workers[0].emit('message', { type: 'event', event: { event: 'training-start', iteration: 2, steps: 17 } });
   const running = (await request('/api/training')).data;

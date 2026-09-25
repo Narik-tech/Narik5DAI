@@ -10,6 +10,7 @@ test('self-play CLI defaults to one bounded cycle and accepts continuous mode', 
   assert.equal(defaults.iterations, 1);
   assert.equal(defaults.gameConcurrency, 1);
   assert.equal(defaults.arenaConcurrency, 1);
+  assert.equal(defaults.maxDepth, 2);
   assert.equal(defaults.device, process.env.TRANSFORMER_DEVICE || 'auto');
   assert.ok(defaults.minPairs <= defaults.arenaPairs);
   const options = parseArguments(['--iterations', '0', '--seed-data', 'none', '--device', 'cpu', '--steps', '3', '--game-concurrency', '4', '--arena-concurrency', '3']);
@@ -19,13 +20,14 @@ test('self-play CLI defaults to one bounded cycle and accepts continuous mode', 
   assert.equal(options.gameConcurrency, 4);
   assert.equal(options.arenaConcurrency, 3);
   assert.equal(parseArguments(['--depth', '64']).maxDepth, 64);
+  assert.equal(parseArguments(['--depth', '0']).maxDepth, 0);
 });
 
 test('self-play CLI rejects malformed limits and unsafe promotion thresholds', () => {
   for (const args of [ ['--games', '0'], ['--steps', '1.5'], ['--nodes', 'NaN'], ['--iterations', '-1'],
     ['--game-concurrency', '0'], ['--game-concurrency', '9'], ['--game-concurrency', '1.5'], ['--game-concurrency', 'NaN'],
     ['--arena-concurrency', '0'], ['--arena-concurrency', '9'], ['--arena-concurrency', '1.5'], ['--arena-concurrency', 'NaN'],
-    ['--exploration', '1.1'], ['--outcome-weight', '-.1'], ['--promotion-score', '.5'], ['--depth', '65'],
+    ['--exploration', '1.1'], ['--outcome-weight', '-.1'], ['--promotion-score', '.5'], ['--depth', '-1'], ['--depth', '65'],
     ['--arena-pairs', '2', '--min-pairs', '3'], ['--batch-size', '129'], ['--device', 'bogus'], ['--steps'], ['--bogus', '1'] ]) {
     assert.throws(() => parseArguments(args), undefined, args.join(' '));
   }

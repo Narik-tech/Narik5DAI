@@ -40,6 +40,20 @@ function deferred() {
   return { promise, resolve };
 }
 
+test('dynamic depth passes unchanged to self-play searches and saved game limits', async () => {
+  const depths = [];
+  const result = await generateSelfPlayGames({ ...limits, positions: starts(), maxDepth: 0,
+    analyzePosition: (position, options) => {
+      depths.push(options.maxDepth);
+      return firstLegal(position, { limits: { maxDepth: options.maxDepth } });
+    },
+  });
+  assert.deepEqual(depths, [0, 0]);
+  assert.equal(result.games[0].limits.maxDepth, 0);
+  assert(result.games[0].moves.every(move => move.search.limits.maxDepth === 0));
+  assert.equal(result.games[0].valid, true);
+});
+
 test('concurrent games bound overlapping searches, stream completion order and return stable indices', async () => {
   const firstGame = deferred(), seen = [];
   let launched = 0, active = 0, peak = 0, writing = 0, peakWriting = 0;
@@ -358,7 +372,7 @@ test('stream callback is awaited and invalid options are rejected', async () => 
   });
   assert.equal(streamed, true);
   for (const bad of [{ games: 0 }, { gameConcurrency: 0 }, { gameConcurrency: 9 }, { gameConcurrency: 1.5 },
-    { exploration: 2 }, { outcomeWeight: NaN }, { maxNodes: -1 }, { seed: -2 }, { timeMs: 0 }]) {
+    { exploration: 2 }, { outcomeWeight: NaN }, { maxNodes: -1 }, { maxDepth: -1 }, { maxDepth: 65 }, { seed: -2 }, { timeMs: 0 }]) {
     await assert.rejects(generateSelfPlayGames({ ...limits, positions: starts(), analyzePosition: firstLegal, ...bad }), /Invalid/);
   }
   await assert.rejects(generateSelfPlayGames({ ...limits, positions: [], analyzePosition: firstLegal }), /positions/);

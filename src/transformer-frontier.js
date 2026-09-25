@@ -1,5 +1,7 @@
 // Scores are White-relative; all moves at one depth have the same mover.
 // A cached shallow value becomes True only when the scheduler selects it.
+export const DYNAMIC_DEPTH_THRESHOLD = 20;
+
 export function rankDepths(levels, rootSign) {
   return levels.flatMap((nodes, depth) => {
     if (!depth || !nodes?.length) return [];
@@ -10,6 +12,15 @@ export function rankDepths(levels, rootSign) {
     return [{ depth, ranked, searchedMoves: firstCandidate < 0 ? Infinity : firstCandidate,
       candidate: firstCandidate < 0 ? null : ranked[firstCandidate] }];
   });
+}
+
+export function canDeepen(rankings, maxDepth) {
+  if (maxDepth >= 64) return false;
+  const active = rankings.filter(level => level.depth <= maxDepth);
+  // A new ceiling must acquire its own candidates before it can advance again.
+  // Short exhausted depths report Infinity and need no extra evaluations.
+  return active.some(level => level.depth === maxDepth && level.ranked.length > 0)
+    && active.every(level => level.searchedMoves >= DYNAMIC_DEPTH_THRESHOLD);
 }
 
 export function chooseWork(rankings, { maxDepth }) {

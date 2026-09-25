@@ -1,5 +1,5 @@
 import { applyMove, canSubmit, createPositionKeyCache, formatAction, generateActions, generateActionsAsync, inCheck, raw } from './rules.js';
-import { chooseWork, rankDepths } from './transformer-frontier.js';
+import { canDeepen, chooseWork, DYNAMIC_DEPTH_THRESHOLD, rankDepths } from './transformer-frontier.js';
 
 export const MATE_SCORE = 100_000;
 const MATE_THRESHOLD = MATE_SCORE - 1000;
@@ -26,7 +26,9 @@ export async function analyze(position, options = {}) {
   if (typeof options.evaluateBatch !== 'function') throw new Error('Transformer search requires evaluateBatch.');
   const started = performance.now();
   const timeMs = finite(options.timeMs, 3000, 0, 3_600_000);
-  const maxDepth = Math.floor(finite(options.maxDepth, 4, 1, 64));
+  const maxDepth = Math.floor(finite(options.maxDepth, 4, 0, 64));
+  const dynamicDepth = maxDepth === 0;
+  let currentMaxDepth = dynamicDepth ? 1 : maxDepth;
   const maxNodes = Math.floor(finite(options.maxNodes, 200_000, 0, 1_000_000_000));
   const candidateLimit = Math.floor(finite(options.candidateLimit, 64, 1, 256));
   // The same position must see the same candidate set when it becomes the
@@ -374,6 +376,8 @@ export async function analyze(position, options = {}) {
       engine: 'transformer', bestAction, score: whiteScore, depth, nodes, searchNodes, generationNodes,
       qnodes: 0, ttHits: 0, qTtHits: 0, cutoffs: 0, elapsedMs: Math.round(elapsedMs),
       searchingDepth, rootActionsSearched, selectiveDepth,
+      depthMode: dynamicDepth ? 'dynamic' : 'fixed', currentMaxDepth,
+      dynamicDepthThreshold: dynamicDepth ? DYNAMIC_DEPTH_THRESHOLD : null,
       nps: elapsedMs ? Math.round(nodes * 1000 / elapsedMs) : 0, pv, status, completed,
       stoppedReason, tableEntries: 0, cacheMemoryBytes: 0,
       searchPolicy: 'transformer-ranked-depth', candidateLimit, innerCandidateLimit,
@@ -410,8 +414,14 @@ export async function analyze(position, options = {}) {
     } else {
       while (true) {
         check();
-        const work = chooseWork(rankDepths(levels, rootSign), { maxDepth });
-        if (!work) { stoppedReason = depth === maxDepth ? 'depth' : 'frontier'; break; }
+        const rankings = rankDepths(levels, rootSign);
+        if (dynamicDepth && canDeepen(rankings, currentMaxDepth)) {
+          currentMaxDepth++;
+          reportProgress(true);
+          check();
+        }
+        const work = chooseWork(rankings, { maxDepth: currentMaxDepth });
+        if (!work) { stoppedReason = depth === currentMaxDepth ? 'depth' : 'frontier'; break; }
         if (work.kind === 'expand') await expand(work.node);
         else await evaluateCandidate(work.node);
         check(false);

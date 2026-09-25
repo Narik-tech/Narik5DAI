@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { chooseWork, rankDepths } from '../src/transformer-frontier.js';
+import { canDeepen, chooseWork, DYNAMIC_DEPTH_THRESHOLD, rankDepths } from '../src/transformer-frontier.js';
 
 const node = (depth, index, candidateScore, trueScore = null, extra = {}) => ({
   depth, index, candidateScore, trueScore, value: trueScore,
@@ -148,4 +148,83 @@ test('max depth permits candidate evaluation but prevents another expansion', ()
 test('empty frontiers finish without a work item', () => {
   assert.deepEqual(ranked([[], [], []]), []);
   assert.equal(choose([[], [], []]), null);
+});
+
+function depthLevel(depth, truePrefix, total = 25) {
+  const side = depth % 2 ? 1 : -1;
+  return Array.from({ length: total }, (_, index) => {
+    const score = side * (1000 - index * 10);
+    return node(depth, depth * 100 + index, score, index < truePrefix ? score : null);
+  });
+}
+
+test('dynamic depth requires twenty leading True evaluations, with nineteen insufficient', () => {
+  assert.equal(DYNAMIC_DEPTH_THRESHOLD, 20);
+  assert.equal(canDeepen(ranked([[], depthLevel(1, 19)]), 1), false);
+  assert.equal(canDeepen(ranked([[], depthLevel(1, 20)]), 1), true);
+});
+
+test('True evaluations after the first Candidate do not satisfy dynamic depth readiness', () => {
+  const level = depthLevel(1, 19);
+  for (const entry of level.slice(20)) entry.trueScore = entry.value = entry.candidateScore;
+  assert.equal(level.filter(entry => entry.trueScore !== null).length, 24);
+  const rankings = ranked([[], level]);
+  assert.equal(rankings[0].searchedMoves, 19);
+  assert.equal(canDeepen(rankings, 1), false);
+});
+
+test('dynamic depth requires the prefix at every active depth and ignores future levels', () => {
+  const first = depthLevel(1, 20), second = depthLevel(2, 19), future = depthLevel(3, 0);
+  const levels = [[], first, second, future];
+  assert.equal(canDeepen(ranked(levels), 2), false);
+  second[19].trueScore = second[19].value = second[19].candidateScore;
+  assert.equal(canDeepen(ranked(levels), 2), true, 'both searched depths now have twenty True leaders');
+  assert.equal(canDeepen(ranked(levels), 3), false, 'a newly active depth must earn its own prefix');
+  first[19].trueScore = first[19].value = null;
+  assert.equal(canDeepen(ranked(levels), 2), false, 'a shorter depth can also block advancement');
+});
+
+test('dynamic readiness uses current rankings after backed scores change', () => {
+  const level = depthLevel(1, 20);
+  assert.equal(canDeepen(ranked([[], level]), 1), true);
+  level[0].value = -100;
+  assert.equal(canDeepen(ranked([[], level]), 1), false,
+    'a True value falling below the leading Candidate reduces the current prefix');
+  level[0].value = level[0].trueScore;
+  assert.equal(canDeepen(ranked([[], level]), 1), true);
+});
+
+test('short exhausted depths count as ready when all their available entries are True', () => {
+  const levels = [[], depthLevel(1, 3, 3), depthLevel(2, 2, 2)];
+  assert(ranked(levels).every(level => level.searchedMoves === Infinity));
+  assert.equal(canDeepen(ranked(levels), 2), true);
+  levels[2][1].trueScore = levels[2][1].value = null;
+  assert.equal(canDeepen(ranked(levels), 2), false, 'a short frontier must finish every available entry');
+});
+
+test('empty rankings and a missing current ceiling cannot advance dynamic depth', () => {
+  assert.equal(canDeepen([], 1), false);
+  assert.equal(canDeepen(ranked([[], [], []]), 1), false);
+  const rankings = ranked([[], depthLevel(1, 3, 3)]);
+  assert.equal(canDeepen(rankings, 1), true);
+  assert.equal(canDeepen(rankings, 2), false, 'advancement waits for actual candidates at the new ceiling');
+});
+
+test('terminal-only frontiers cannot repeatedly advance the dynamic ceiling', () => {
+  const level = depthLevel(1, 3, 3);
+  for (const entry of level) entry.terminal = { score: 0 };
+  const rankings = ranked([[], level]);
+  assert.equal(canDeepen(rankings, 1), true);
+  assert.equal(chooseWork(rankings, { maxDepth: 2 }), null, 'no terminal node can expand after raising the ceiling');
+  assert.equal(canDeepen(rankings, 2), false, 'the absent new frontier prevents another increment');
+});
+
+test('dynamic depth can reach the engine limit but never advance beyond sixty-four', () => {
+  const levels = [];
+  levels[63] = depthLevel(63, 20);
+  assert.equal(canDeepen(ranked(levels), 63), true);
+  levels[64] = depthLevel(64, 20);
+  assert.equal(canDeepen(ranked(levels), 64), false);
+  levels[65] = depthLevel(65, 20);
+  assert.equal(canDeepen(ranked(levels), 65), false);
 });

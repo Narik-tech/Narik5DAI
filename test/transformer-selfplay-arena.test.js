@@ -27,6 +27,24 @@ function deferred() {
 }
 const parallelSuite = () => ({ cases: [{ id: 'tiny', position: tiny() }, { id: 'mating', position: mating() }] });
 
+test('dynamic depth reaches both arena engines and preserves requested game limits', async () => {
+  const calls = [];
+  const engine = name => (position, options) => {
+    calls.push({ name, depth: options.maxDepth, engine: options.engine });
+    return firstLegal(position);
+  };
+  const report = await evaluateCandidate({ candidate: engine('candidate'), incumbent: engine('incumbent'),
+    suite: { cases: [{ id: 'tiny', position: tiny() }] }, pairs: 1, minPairs: 1,
+    ...limits, maxDepth: 0,
+  });
+  assert.deepEqual(calls, [
+    { name: 'candidate', depth: 0, engine: 'transformer' },
+    { name: 'incumbent', depth: 0, engine: 'transformer' },
+  ]);
+  assert.equal(report.limits.maxDepth, 0);
+  assert(report.games.every(game => game.valid && game.limits.maxDepth === 0));
+});
+
 function syntheticPairs(outcomes, { duplicate = false, unplayed = false } = {}) {
   const games = [], pairs = [];
   for (const [index, results] of outcomes.entries()) {
@@ -448,7 +466,7 @@ test('engine cancellation and mutation are handled without forgiving invalid gam
 
 test('invalid arena configuration is rejected before play', async () => {
   const base = { candidate: firstLegal, incumbent: firstLegal, suite: { cases: [{ id: 'tiny', position: tiny() }] } };
-  for (const patch of [{ pairs: 0 }, { minPairs: 0 }, { seed: -1 }, { promotionScore: 0.49 }, { timeMs: 0 },
+  for (const patch of [{ pairs: 0 }, { minPairs: 0 }, { seed: -1 }, { promotionScore: 0.49 }, { timeMs: 0 }, { maxDepth: -1 }, { maxDepth: 65 },
     ...[0, 9, 1.5, NaN, '2'].map(gameConcurrency => ({ gameConcurrency }))]) {
     await assert.rejects(evaluateCandidate({ ...base, ...patch }));
   }

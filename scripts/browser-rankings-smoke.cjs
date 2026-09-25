@@ -46,7 +46,7 @@ const median = values => values.toSorted((a, b) => a - b)[Math.floor(values.leng
     let currentJob, nextJob = 1;
     page.on('pageerror', error => errors.push(error.message));
 
-    function snapshot(version, done = false) {
+    function snapshot(version, done = false, maxDepth = 16) {
       const leader = version ? second : first;
       const candidateLeads = version === 3;
       const rootOrder = version && !candidateLeads ? [rootChoices[1], rootChoices[0], ...rootChoices.slice(2)] : rootChoices;
@@ -83,6 +83,8 @@ const median = values => values.toSorted((a, b) => a - b)[Math.floor(values.leng
         notation: formatAction(start, leader.moves), score: version ? 235 : 120, scoreType: 'cp', mateIn: null,
         pv: [leader.moves], pvNotation: [formatAction(start, leader.moves)], pvDepth: 1,
         depth: version > 1 ? 4 : 3, searchingDepth: version > 1 ? 4 : 3, selectiveDepth: version > 1 ? 4 : 3,
+        depthMode: maxDepth === 0 ? 'dynamic' : 'fixed', currentMaxDepth: maxDepth === 0 ? version > 1 ? 4 : 3 : maxDepth,
+        dynamicDepthThreshold: maxDepth === 0 ? 20 : null,
         status: 'ok', completed: true, stoppedReason: done ? 'depth' : null,
         nodes: 1000 + version * 100, searchNodes: 100, generationNodes: 900 + version * 100,
         trueEvaluations: 12 + version, evaluations: 120 + version * 10, inferenceBatches: 10,
@@ -90,7 +92,7 @@ const median = values => values.toSorted((a, b) => a - b)[Math.floor(values.leng
         expansionRank: 1, rankings, candidateLimit: 64, innerCandidateLimit: 64,
         depthStats: rankings.map(row => ({ depth: row.depth, candidates: row.entries.filter(entry => entry.evaluationType === 'candidate').length,
           trueEvaluations: row.entries.filter(entry => entry.evaluationType === 'true').length, searchedMoves: row.searchedMoves })),
-        limits: { timeMs: 10000, maxDepth: 16, maxNodes: 2000000, candidateLimit: 64, innerCandidateLimit: 64 },
+        limits: { timeMs: 10000, maxDepth, maxNodes: 2000000, candidateLimit: 64, innerCandidateLimit: 64 },
         model: { device: 'mock', config: { max_tokens: 4096 } },
       };
     }
@@ -100,9 +102,10 @@ const median = values => values.toSorted((a, b) => a - b)[Math.floor(values.leng
       { id: 'transformer', name: 'Transformer', available: true, status: 'ready' },
     ] } }));
     await page.route('**/api/analyze', async route => {
-      assert.equal(route.request().postDataJSON().engine, 'transformer');
+      const options = route.request().postDataJSON();
+      assert.equal(options.engine, 'transformer');
       currentJob = { id: `rankings-${nextJob++}`, version: 0, status: 'running', delayMs: 12,
-        pollStarts: [], inFlight: 0, maxInFlight: 0, stopped: false, holdNext: null };
+        maxDepth: options.maxDepth, pollStarts: [], inFlight: 0, maxInFlight: 0, stopped: false, holdNext: null };
       jobs.set(currentJob.id, currentJob);
       await route.fulfill({ status: 202, json: { jobId: currentJob.id } });
     });
@@ -123,7 +126,7 @@ const median = values => values.toSorted((a, b) => a - b)[Math.floor(values.leng
         job.holdNext = null;
         if (hold) { hold.started.resolve(); await hold.release.promise; }
         else await delay(job.delayMs);
-        const data = snapshot(job.version, job.status === 'done');
+        const data = snapshot(job.version, job.status === 'done', job.maxDepth);
         if (job.stale) { data.notation = 'Stale transformer result'; data.rankings[0].entries[0].notation = 'Stale ranking'; }
         await route.fulfill({ json: { jobId: job.id, status: job.status,
           ...(job.status === 'done' ? { result: data } : { progress: data }) } });
@@ -132,7 +135,7 @@ const median = values => values.toSorted((a, b) => a - b)[Math.floor(values.leng
     await page.route('**/api/play', async route => {
       const request = route.request().postDataJSON(), job = jobs.get(request.jobId);
       assert(job && job.status === 'done', 'Play best must use the completed displayed job.');
-      const result = snapshot(job.version, true);
+      const result = snapshot(job.version, true, job.maxDepth);
       played.push({ request, notation: result.notation });
       let revision = request.revision, game;
       for (const move of result.bestAction) {
@@ -148,7 +151,22 @@ const median = values => values.toSorted((a, b) => a - b)[Math.floor(values.leng
 
     await page.goto(origin);
     await page.locator('#connection.online').waitFor();
+    assert.equal(await page.locator('#search-depth').inputValue(), '4', 'Fixed depth remains the default.');
     await page.locator('#engine-select').selectOption('transformer');
+    await page.locator('#search-depth').selectOption('1');
+    await page.locator('#search-depth').selectOption('0');
+    await page.reload();
+    await page.locator('#connection.online').waitFor();
+    assert.equal(await page.locator('#engine-select').inputValue(), 'transformer');
+    assert.equal(await page.locator('#search-depth').inputValue(), '0', 'Dynamic mode persists with the transformer.');
+    await page.locator('#engine-select').selectOption('classical');
+    assert.equal(await page.locator('#search-depth').inputValue(), '4', 'Classical selection replaces dynamic mode with a supported fixed depth.');
+    assert.equal(await page.locator('#search-depth option[value="0"]').evaluate(option => option.disabled), true);
+    await page.reload();
+    await page.locator('#connection.online').waitFor();
+    assert.equal(await page.locator('#search-depth').inputValue(), '4', 'The normalized classical depth persists.');
+    await page.locator('#engine-select').selectOption('transformer');
+    await page.locator('#search-depth').selectOption('0');
     await page.locator('#analyze-button').click();
     await page.locator('#best-move').filter({ hasText: firstNotation }).waitFor();
     assert.equal(await page.locator('#search-status').textContent(), 'SEARCHING');
@@ -158,6 +176,10 @@ const median = values => values.toSorted((a, b) => a - b)[Math.floor(values.leng
     assert.match(await page.locator('#ranking-summary').textContent(), /10.*20.*White/i);
     assert.deepEqual(await page.locator('#ranking-list > li .evaluation-badge').allTextContents(), ['True', ...Array(9).fill('Candidate')]);
     const job = currentJob;
+    assert.equal(job.maxDepth, 0, 'Analysis forwards the requested dynamic depth unchanged.');
+    assert.match(await page.locator('#analysis-note').textContent(), /Dynamic depth; current ceiling: 3 turns/);
+    assert.match(await page.locator('#analysis-note').textContent(), /top 20 ranks at every searched depth must be True/);
+    assert.match(await page.locator('#stat-depth').getAttribute('title'), /Dynamic mode; current depth ceiling: 3 turns/);
     await until(() => job.pollStarts.length >= 7, 'seven fast analysis polls');
     const fastIntervals = job.pollStarts.slice(1, 7).map((time, index) => time - job.pollStarts[index]);
     const fastMedian = median(fastIntervals);
@@ -181,6 +203,7 @@ const median = values => values.toSorted((a, b) => a - b)[Math.floor(values.leng
     assert.match(await details.textContent(), /d4/);
     job.version = 2;
     await page.locator('#ranking-tabs [role="tab"][data-depth="4"]').waitFor();
+    assert.match(await page.locator('#analysis-note').textContent(), /Dynamic depth; current ceiling: 4 turns/);
     assert.equal(await depthTwo.getAttribute('aria-selected'), 'true', 'Selected depth survives progress updates and new depths.');
     assert(await depthTwoNode.evaluate(node => node.isConnected), 'Tab elements remain stable across updates.');
     assert(await detailsNode.evaluate(node => node.isConnected && node.open), 'Open contextual lines survive updates.');

@@ -16,6 +16,16 @@ function firstLegal(position, overrides = {}) {
     nodes: 2, searchNodes: 1, generationNodes: 1, score: 99999, stoppedReason: 'depth', ...overrides };
 }
 
+test('zero depth remains invalid for default and classical match callers', async () => {
+  for (const engine of [undefined, 'classical']) {
+    await assert.rejects(runGame({ position: tiny(), ...options, engine, maxDepth: 0 }), /Invalid maxDepth/);
+  }
+  const parsed = parseArguments(['--depth', '0']);
+  await assert.rejects(runMatchSuite({ ...parsed.options,
+    suite: { cases: [{ id: 'tiny', position: tiny() }] },
+  }), /Invalid maxDepth/);
+});
+
 test('default match fixtures are legal nonterminal starts separate from tactics', async () => {
   const suite = await loadMatchSuite();
   assert(suite.cases.length >= 8);

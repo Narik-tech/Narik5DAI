@@ -53,6 +53,10 @@ The command-line interface selects the same engine:
 npm run analyze -- --engine transformer --time 3 --depth 3
 ```
 
+Select **Dynamic (0)** in the analysis depth control, or pass `--depth 0`, to
+let the search increase its depth ceiling as the leading evaluations become
+ready. Fixed depths from 1 through 64 remain available.
+
 ## Search architecture
 
 The transformer engine uses its own asynchronous search with rankings at every
@@ -92,7 +96,17 @@ True Evaluation in first place, rank one becomes eligible for expansion. When
 every pending depth has two leading True Evaluations, the top two ranks become
 eligible. Eligibility is recalculated whenever the rankings change. When no candidates remain,
 the scheduler can expand any remaining eligible True Evaluation. Max depth is
-a ceiling on complete turns and supports values up to **64**.
+a ceiling on complete turns and supports fixed values from **1 through 64**.
+
+**Dynamic depth (`maxDepth: 0`)** starts with a ceiling of one complete turn.
+It raises that ceiling by exactly one when the current top **20** entries at
+every searched depth are True Evaluations. This uses the ranked True prefix,
+not the total number of evaluations performed. A depth with fewer than 20
+generated entries qualifies when all of them are True. Each new ceiling must
+acquire its own ranked entries before the ceiling can increase again; changes
+to backed-up scores are reflected in the next readiness check. The ceiling
+never decreases and remains capped at 64. Time, node, and cancellation limits
+still apply.
 
 During candidate construction, the transformer evaluates every distinct
 partial-move successor eligible at each visited prefix in batches of at most
@@ -139,6 +153,9 @@ analysis reports `searchPolicy: transformer-ranked-depth` and candidate caps.
 `depth` is the deepest True Evaluation reached, `pvDepth` is the length of the
 selected principal variation, and `selectiveDepth` is the deepest generated or
 probed turn, including work in interrupted generation. These can differ.
+`depthMode` distinguishes `fixed` and `dynamic`, while `currentMaxDepth` reports
+the active ceiling. Dynamic results preserve `limits.maxDepth: 0` and report
+`dynamicDepthThreshold: 20`. The analysis UI shows the active dynamic ceiling.
 `depthStats` reports each depth's candidate
 count, True Evaluation count, Searched Moves, and highest candidate rank;
 `searchedMoves: null` means the depth has no pending candidates. `expansionRank`
