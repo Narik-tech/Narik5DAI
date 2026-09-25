@@ -11,6 +11,9 @@ let toastTimer = null;
 let autoTimer = null;
 let autoRevision = null;
 let initialPosition = true;
+let rankingJob = null, selectedRankingDepth = null, visibleRankings = [];
+let recommendationSignature = '', variationSignature = '', continuationAnimation;
+const rankingTabs = new Map(), rankingRows = new Map();
 let boardSize = Number($('board-size').value);
 const searchSettingsKey = 'vibe-d-ai.search-settings.v1';
 const resourceSettingIds = ['time-budget', 'search-depth', 'node-budget', 'cache-memory', 'search-threads'];
@@ -325,6 +328,85 @@ async function changeGame(path, payload, after) {
 }
 async function playMove(move) { await changeGame('/api/move',{move:move.raw,revision:game.revision}); }
 function compactNumber(value) { return Number.isFinite(value) ? Intl.NumberFormat('en',{notation:'compact',maximumFractionDigits:1}).format(value) : '—'; }
+function scoreLabel(value) {
+  if (!Number.isFinite(value?.score)) return '—';
+  const prefix = value.score > 0 ? '+' : value.score < 0 ? '−' : '';
+  return value.scoreType === 'mate' ? `${value.score >= 0 ? '+' : '−'}M${Number.isFinite(value.mateIn) ? Math.abs(value.mateIn) : ''}` : `${prefix}${(Math.abs(value.score) / 100).toFixed(2)}`;
+}
+function setText(node, text) { if (node.textContent !== text) node.textContent = text; }
+function reconcileChildren(parent, children) {
+  children.forEach((child, index) => { if (parent.children[index] !== child) parent.insertBefore(child, parent.children[index] || null); });
+  while (parent.children.length > children.length) parent.lastElementChild.remove();
+}
+function renderRankings(result) {
+  if (rankingJob !== search?.id) {
+    rankingJob = search?.id;
+    selectedRankingDepth = null;
+    rankingTabs.clear(); rankingRows.clear();
+    $('ranking-tabs').replaceChildren(); $('ranking-list').replaceChildren();
+    recommendationSignature = ''; variationSignature = '';
+    continuationAnimation?.cancel();
+  }
+  visibleRankings = Array.isArray(result?.rankings) ? result.rankings.filter(level => Number.isInteger(level.depth) && Array.isArray(level.entries)).toSorted((a, b) => a.depth - b.depth) : [];
+  $('continuation-rankings').hidden = !visibleRankings.length;
+  if (!visibleRankings.length) return;
+  const restoreTabFocus = $('ranking-tabs').contains(document.activeElement) && !visibleRankings.some(level => level.depth === Number(document.activeElement.dataset.depth));
+  if (!visibleRankings.some(level => level.depth === selectedRankingDepth)) selectedRankingDepth = visibleRankings[0].depth;
+  const wantedTabs = visibleRankings.map(level => {
+    let tab = rankingTabs.get(level.depth);
+    if (!tab) {
+      tab = element('button', 'ranking-tab', `Depth ${level.depth}`);
+      tab.type = 'button'; tab.id = `ranking-tab-${level.depth}`; tab.dataset.depth = String(level.depth);
+      tab.setAttribute('role', 'tab'); tab.setAttribute('aria-controls', 'ranking-panel');
+      rankingTabs.set(level.depth, tab);
+    }
+    const active = level.depth === selectedRankingDepth;
+    tab.setAttribute('aria-selected', String(active)); tab.tabIndex = active ? 0 : -1;
+    return tab;
+  });
+  reconcileChildren($('ranking-tabs'), wantedTabs);
+  for (const [depth] of rankingTabs) if (!visibleRankings.some(level => level.depth === depth)) rankingTabs.delete(depth);
+  if (restoreTabFocus) rankingTabs.get(selectedRankingDepth)?.focus({ preventScroll: true });
+  $('ranking-panel').setAttribute('aria-labelledby', `ranking-tab-${selectedRankingDepth}`);
+  const level = visibleRankings.find(item => item.depth === selectedRankingDepth), entries = level.entries.slice(0, 10);
+  const side = level.side === 'black' ? 'Black' : 'White';
+  setText($('ranking-summary'), `Showing ${entries.length} of ${level.total ?? level.entries.length} · ${side} to move · scores for White`);
+  const wantedRows = entries.map(entry => {
+    const key = `${level.depth}:${entry.id}`;
+    let row = rankingRows.get(key);
+    if (!row) {
+      row = element('li', 'ranking-entry'); row.dataset.entryId = String(entry.id);
+      const heading = element('div', 'ranking-row-heading');
+      heading.append(element('span', 'ranking-rank'), element('span', 'evaluation-badge'), element('strong', 'ranking-score'));
+      const line = element('details', 'ranking-line');
+      line.append(element('summary', ''), element('ol', ''));
+      row.append(heading, element('p', 'ranking-move'), line);
+      rankingRows.set(key, row);
+    }
+    setText(row.querySelector('.ranking-rank'), `#${entry.rank}`);
+    const badge = row.querySelector('.evaluation-badge'), type = entry.evaluationType === 'true' ? 'true' : 'candidate';
+    badge.dataset.evaluationType = type; setText(badge, type === 'true' ? 'True' : 'Candidate');
+    setText(row.querySelector('.ranking-score'), scoreLabel(entry));
+    setText(row.querySelector('.ranking-move'), notation(entry.notation) || 'Submit the current turn');
+    const line = Array.isArray(entry.line) ? entry.line.map(notation) : [], signature = JSON.stringify(line), details = row.querySelector('details');
+    details.hidden = !line.length;
+    setText(details.querySelector('summary'), `Full continuation · ${line.length} ${line.length === 1 ? 'turn' : 'turns'}`);
+    if (details.dataset.signature !== signature) {
+      details.querySelector('ol').replaceChildren(...line.map(move => element('li', '', move || 'Submit the current turn')));
+      details.dataset.signature = signature;
+    }
+    return row;
+  });
+  reconcileChildren($('ranking-list'), wantedRows);
+  const retained = new Set(visibleRankings.flatMap(item => item.entries.slice(0, 10).map(entry => `${item.depth}:${entry.id}`)));
+  for (const [key] of rankingRows) if (!retained.has(key)) rankingRows.delete(key);
+}
+function selectRankingDepth(depth, focus = false) {
+  selectedRankingDepth = depth;
+  renderRankings(search?.result || search?.progress);
+  if (focus) rankingTabs.get(depth)?.focus({ preventScroll: true });
+  rankingTabs.get(depth)?.scrollIntoView({ block: 'nearest', inline: 'nearest' });
+}
 function renderResourceStats(result) {
   const maxNodes = result?.limits?.maxNodes ?? Number($('node-budget').value);
   const cacheMb = result?.limits?.cacheMemoryMb ?? Number($('cache-memory').value);
@@ -342,11 +424,14 @@ function renderAnalysis() {
   const result = search?.result || search?.progress;
   const running = search?.status === 'running';
   const rankedDepth = result?.searchPolicy === 'transformer-ranked-depth';
-  const score = result?.score;
+  renderRankings(result);
+  const liveLeader = running && rankedDepth ? result.rankings?.find(level => level.depth === 1)?.entries?.[0] : null;
+  const displayedEvaluation = liveLeader || result;
+  const score = displayedEvaluation?.score;
   $('search-status').textContent = running ? 'SEARCHING' : result?.stoppedReason === 'cancelled' || search?.status === 'cancelled' ? 'STOPPED' : search?.status === 'done' ? result?.completed ? 'COMPLETE' : 'PARTIAL' : search?.status === 'error' ? 'ERROR' : engineIdleStatus();
   $('search-status').classList.toggle('searching',running);
-  const isMate = result?.scoreType === 'mate';
-  $('eval-score').textContent = Number.isFinite(score) ? isMate ? `${score >= 0 ? '+' : '−'}M${Number.isFinite(result.mateIn) ? Math.abs(result.mateIn) : ''}` : `${score > 0 ? '+' : score < 0 ? '−' : ''}${(Math.abs(score)/100).toFixed(2)}` : '—';
+  const isMate = displayedEvaluation?.scoreType === 'mate';
+  setText($('eval-score'), scoreLabel(displayedEvaluation));
   $('eval-label').textContent = Number.isFinite(score) ? result?.status === 'checkmate' ? `${sideLabel()} is checkmated` : result?.status === 'stalemate' ? 'Stalemate' : isMate ? `${score >= 0 ? 'White' : 'Black'} has a mating line` : Math.abs(score) < 20 ? 'Approximately equal' : `${score > 0 ? 'White' : 'Black'} is favored` : running ? 'Exploring possible continuations…' : search?.result ? 'Evaluation unavailable' : 'Run an analysis to evaluate';
   $('evaluation-fill').style.height = `${Number.isFinite(score) ? 50 + 47 * Math.tanh(score / 600) : 50}%`;
   $('stat-depth').textContent = result?.depth ?? '—';
@@ -388,13 +473,31 @@ function renderAnalysis() {
   }
   $('analysis-note').textContent = note;
   $('analysis-note').hidden = !note;
-  const bestNotation = notation(result?.notation) || (Array.isArray(result?.bestAction) ? result.bestAction.length ? result.bestAction.map(raw => readableMove({raw})).join(' / ') : 'Submit the current turn' : '');
-  $('best-move').textContent = bestNotation;
+  const bestNotation = liveLeader ? notation(liveLeader.notation) || notation(liveLeader.line?.[0]) || 'Submit the current turn' : notation(result?.notation) || (Array.isArray(result?.bestAction) ? result.bestAction.length ? result.bestAction.map(raw => readableMove({raw})).join(' / ') : 'Submit the current turn' : '');
+  setText($('continuation-heading'), liveLeader ? 'LEADING CONTINUATION' : 'BEST CONTINUATION');
+  setText($('best-move'), bestNotation);
   $('best-move').hidden = !bestNotation;
   $('recommendation-empty').hidden = Boolean(bestNotation);
   $('recommendation-empty').textContent = running ? 'Searching for a complete turn…' : result?.status === 'checkmate' ? 'No safe turn is available.' : result?.status === 'stalemate' ? 'No playable turn is available.' : result?.stoppedReason === 'policy' ? 'No turn satisfies the optional-board search restriction.' : search?.status === 'cancelled' ? 'Analysis stopped.' : 'The next possibility is waiting.';
-  const pv = result?.pvNotation || [];
-  $('principal-variation').replaceChildren(...pv.slice(1,8).map(move => element('li','',notation(move))));
+  const pv = liveLeader ? liveLeader.line || [liveLeader.notation] : result?.pvNotation || [];
+  const evaluationType = liveLeader?.evaluationType || (rankedDepth && bestNotation ? result.completed ? 'true' : 'candidate' : null);
+  $('best-evaluation-meta').hidden = !evaluationType;
+  if (evaluationType) {
+    $('best-evaluation').dataset.evaluationType = evaluationType;
+    setText($('best-evaluation'), evaluationType === 'true' ? 'True' : 'Candidate');
+    setText($('best-evaluation-score'), scoreLabel(displayedEvaluation));
+  }
+  const nextVariation = JSON.stringify(pv.slice(1).map(notation));
+  if (nextVariation !== variationSignature) {
+    $('principal-variation').replaceChildren(...pv.slice(1).map(move => element('li','',notation(move))));
+    variationSignature = nextVariation;
+  }
+  const nextRecommendation = JSON.stringify([liveLeader?.id, bestNotation, evaluationType, nextVariation]);
+  if (recommendationSignature && nextRecommendation !== recommendationSignature && bestNotation && !matchMedia('(prefers-reduced-motion: reduce)').matches) {
+    continuationAnimation?.cancel();
+    continuationAnimation = $('best-move').animate([{ backgroundColor: '#9af2d72b' }, { backgroundColor: 'transparent' }], { duration: 650 });
+  }
+  recommendationSignature = nextRecommendation;
   updateControls();
 }
 async function startAnalysis(autoPlay = false) {
@@ -413,13 +516,15 @@ async function startAnalysis(autoPlay = false) {
     const data = await api('/api/analyze', options);
     search = {id:data.jobId,revision,engine:options.engine,status:'running',result:null,progress:null,autoPlay};
     renderAnalysis();
-    pollTimer = setTimeout(pollAnalysis,120);
+    pollTimer = setTimeout(pollAnalysis,100);
   } catch (error) { toast(error.message,true); }
   finally { setBusy(false); }
 }
 async function pollAnalysis() {
   const current = search;
-  if (!current || current.status !== 'running') return;
+  if (!current || current.status !== 'running' || current.polling) return;
+  current.polling = true;
+  const pollStarted = performance.now();
   try {
     const data = await api(`/api/analysis/${encodeURIComponent(current.id)}`);
     if (search !== current) return;
@@ -427,18 +532,20 @@ async function pollAnalysis() {
     if (data.progress) current.progress = data.progress;
     if (data.result) current.result = data.result;
     renderAnalysis();
-    if (data.status === 'running') pollTimer = setTimeout(pollAnalysis,350);
-    else if (data.status === 'error') { toast(data.error || 'The engine could not complete this analysis.',true); }
+    if (data.status === 'error') { toast(data.error || 'The engine could not complete this analysis.',true); }
     else if (data.status === 'done' && current.autoPlay && current.engine === selectedEngine() && current.revision === game.revision && current.result?.bestAction && $('ai-side').value === sideLabel().toLowerCase()) await playBest();
   } catch (error) {
     if (search === current) { current.status = 'error'; renderAnalysis(); toast(error.message,true); }
+  } finally {
+    current.polling = false;
+    if (search === current && current.status === 'running') pollTimer = setTimeout(pollAnalysis, Math.max(0, 100 - (performance.now() - pollStarted)));
   }
 }
 async function stopAnalysis() {
   if (!search || search.status !== 'running') return;
   const current = search;
   current.autoPlay = false;
-  try { await api(`/api/analysis/${encodeURIComponent(current.id)}/stop`,{}); if (search === current) { clearTimeout(pollTimer); pollTimer = setTimeout(pollAnalysis,120); } }
+  try { await api(`/api/analysis/${encodeURIComponent(current.id)}/stop`,{}); if (search === current && !current.polling) { clearTimeout(pollTimer); pollTimer = setTimeout(pollAnalysis,100); } }
   catch (error) { toast(error.message,true); }
 }
 async function playBest() {
@@ -458,6 +565,18 @@ function scheduleOpponent() {
 }
 
 $('orientation').addEventListener('change',renderBoards);
+$('ranking-tabs').addEventListener('click', event => {
+  const tab = event.target.closest('[role="tab"]');
+  if (tab) selectRankingDepth(Number(tab.dataset.depth));
+});
+$('ranking-tabs').addEventListener('keydown', event => {
+  const tab = event.target.closest('[role="tab"]');
+  if (!tab || !['ArrowLeft', 'ArrowRight', 'Home', 'End'].includes(event.key)) return;
+  event.preventDefault();
+  const index = visibleRankings.findIndex(level => level.depth === Number(tab.dataset.depth));
+  const next = event.key === 'Home' ? 0 : event.key === 'End' ? visibleRankings.length - 1 : (index + (event.key === 'ArrowRight' ? 1 : -1) + visibleRankings.length) % visibleRankings.length;
+  selectRankingDepth(visibleRankings[next].depth, true);
+});
 for (const id of resourceSettingIds) $(id).addEventListener('change', () => {
   saveSearchSettings();
   renderResourceStats(search?.result || search?.progress);

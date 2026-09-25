@@ -68,6 +68,10 @@ test('transformer routes batched evaluation through server, supports repeated wo
     assert.equal(job.result.contextTruncated, true);
     assert.equal(job.result.model.device, 'test');
     assert.ok(job.result.bestAction.length);
+    assert.equal(job.result.progressIntervalMs, 100);
+    assert.equal(job.result.rankings[0].entries.length, 10);
+    assert.equal(job.result.rankings[0].entries[0].evaluationType, 'true');
+    assert.equal(job.result.rankings[0].entries[0].notation, job.result.notation);
     const played = await request('/api/play', { jobId: created.data.jobId, revision: game.revision });
     assert.equal(played.status, 200, played.data.error);
   }

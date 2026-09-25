@@ -1,4 +1,4 @@
-import { applyMove, canSubmit, createPositionKeyCache, generateActions, generateActionsAsync, inCheck, raw } from './rules.js';
+import { applyMove, canSubmit, createPositionKeyCache, formatAction, generateActions, generateActionsAsync, inCheck, raw } from './rules.js';
 import { chooseWork, rankDepths } from './transformer-frontier.js';
 
 export const MATE_SCORE = 100_000;
@@ -9,6 +9,8 @@ const finite = (value, fallback, min, max) => Number.isFinite(Number(value))
 class SearchInterrupted extends Error {}
 class TerminalProbeDeferred extends Error {}
 const SHALLOW_TERMINAL_WORK = 64;
+const PROGRESS_INTERVAL_MS = 100;
+const DISPLAY_RANK_LIMIT = 10;
 
 /**
  * Neural value search over complete legal submissions. Distinct partial-move
@@ -45,6 +47,7 @@ export async function analyze(position, options = {}) {
   let completed = false, status = 'incomplete', stoppedReason = null;
   let mateProven = false;
   let candidateCaps = 0, lastProgress = started;
+  const notationCache = new WeakMap();
 
   function check(includeNodes = true) {
     if (options.shouldStop?.()) stoppedReason = 'cancelled';
@@ -57,9 +60,14 @@ export async function analyze(position, options = {}) {
     check(); nodes++;
     if (kind === 'generation') generationNodes++;
     else searchNodes++;
-    if (options.onProgress && bestAction && performance.now() - lastProgress >= 250) {
-      lastProgress = performance.now(); options.onProgress(snapshot());
-    }
+    reportProgress();
+  }
+  function reportProgress(force = false) {
+    if (!options.onProgress || bestAction === null) return;
+    const now = performance.now();
+    if (!force && now - lastProgress < PROGRESS_INTERVAL_MS) return;
+    lastProgress = now;
+    options.onProgress(snapshot());
   }
   function retainRootCandidate(moves, next, terminal = null) {
     if (completed) return;
@@ -250,7 +258,7 @@ export async function analyze(position, options = {}) {
     let timer;
     const interrupted = new Promise((resolve, reject) => {
       const poll = () => {
-        try { check(false); }
+        try { check(false); reportProgress(); }
         catch (error) { reject(error); return; }
         timer = setTimeout(poll, Math.min(25, Math.max(1, deadline - performance.now())));
       };
@@ -332,9 +340,30 @@ export async function analyze(position, options = {}) {
     depth = Math.max(depth, node.depth);
     backup(node);
     publishRoot();
-    if (depth > previousDepth || performance.now() - lastProgress >= 250) {
-      lastProgress = performance.now(); options.onProgress?.(snapshot());
+    reportProgress(depth > previousDepth);
+  }
+  function notationFor(node) {
+    if (!notationCache.has(node)) {
+      notationCache.set(node, formatAction(node.parent.position, node.moves) || 'Submit turn');
     }
+    return notationCache.get(node);
+  }
+  function displayEntry(node, index) {
+    const isTrue = node.trueScore !== null;
+    const value = isTrue ? node.value : node.candidateScore;
+    const provenMate = isTrue && node.mateProven && Math.abs(value) > MATE_THRESHOLD;
+    const line = [];
+    // Retain the route from the root: entries at the same depth can belong to
+    // different branches, so their move notation alone is not enough context.
+    for (let current = node; current.parent; current = current.parent) line.push(notationFor(current));
+    line.reverse();
+    for (let current = node.best; current; current = current.best) line.push(notationFor(current));
+    return {
+      id: node.index, rank: index + 1, evaluationType: isTrue ? 'true' : 'candidate',
+      score: Math.round(value), scoreType: provenMate ? 'mate' : 'cp',
+      mateIn: provenMate ? Math.sign(value) * (MATE_SCORE - Math.abs(value)) : null,
+      notation: notationFor(node), line, expanded: node.children !== null,
+    };
   }
   function snapshot() {
     const elapsedMs = Math.max(0, performance.now() - started);
@@ -349,7 +378,14 @@ export async function analyze(position, options = {}) {
       stoppedReason, tableEntries: 0, cacheMemoryBytes: 0,
       searchPolicy: 'transformer-ranked-depth', candidateLimit, innerCandidateLimit,
       trueEvaluations, pvDepth: pv.length,
+      progressIntervalMs: PROGRESS_INTERVAL_MS,
       expansionRank: Number.isFinite(commonPrefix) ? commonPrefix : null,
+      rankings: rankings.map(level => ({
+        depth: level.depth, side: (level.depth % 2 ? rootSign : -rootSign) > 0 ? 'white' : 'black',
+        total: level.ranked.length,
+        searchedMoves: Number.isFinite(level.searchedMoves) ? level.searchedMoves : null,
+        entries: level.ranked.slice(0, DISPLAY_RANK_LIMIT).map(displayEntry),
+      })),
       depthStats: rankings.map(level => ({
         depth: level.depth, candidates: level.ranked.filter(node => node.trueScore === null).length,
         trueEvaluations: level.ranked.filter(node => node.trueScore !== null).length,

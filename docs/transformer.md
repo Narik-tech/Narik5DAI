@@ -146,6 +146,17 @@ reports the common True prefix, or `null` when no candidates remain and there
 is no finite rank cap on expansion. The UI's classical transposition-cache
 setting applies only to the classical engine.
 
+During analysis, progress and UI polling use a 100 ms cadence. The leading
+continuation shows the current first-ranked root entry, including its **True**
+or **Candidate** label and White-relative score. When analysis finishes, the
+main recommendation shows the evaluated result that **Play best** will use.
+The **Continuations by depth** tabs retain the top ten entries at each depth,
+with their evaluation types, scores, and expandable complete lines from the
+root. Arrow keys, Home, and End navigate the tabs; new progress preserves the
+selected depth. The `rankings` result field carries these bounded display
+snapshots, and `progressIntervalMs` records the update cadence. Notation is
+cached, and unchanged continuation content is retained in the UI.
+
 `completed: true` means a True root evaluation is available or the root was
 proved terminal; it does not mean a full-depth iteration finished. Interruption
 retains the latest backed-up True values. Before that point, a legal unscored
