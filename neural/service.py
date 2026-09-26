@@ -21,9 +21,9 @@ def main():
     try:
         import torch
         try:
-            from .model import choose_device, load_checkpoint, metadata, predict
+            from .model import choose_device, load_checkpoint, metadata, predict, predict_policy
         except ImportError:
-            from model import choose_device, load_checkpoint, metadata, predict
+            from model import choose_device, load_checkpoint, metadata, predict, predict_policy
         if not 1 <= args.batch_size <= 128 or not 1 <= args.threads <= 32:
             raise ValueError("batch-size must be 1–128 and threads must be 1–32")
         torch.set_num_threads(args.threads)
@@ -49,6 +49,12 @@ def main():
             if not isinstance(request, dict):
                 raise ValueError("request must be an object")
             request_id = request.get("id")
+            if request.get("type") == "policy":
+                scores = predict_policy(model, request.get("position"), request.get("moves"), device)
+                emit({"id": request_id, "scores": scores, "device": str(device)})
+                continue
+            if request.get("type") not in (None, "evaluate"):
+                raise ValueError("unknown inference request type")
             positions = request.get("positions")
             if not isinstance(positions, list) or not 1 <= len(positions) <= 128:
                 raise ValueError("positions must contain between 1 and 128 positions")

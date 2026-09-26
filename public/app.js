@@ -424,7 +424,8 @@ function renderResourceStats(result) {
 function renderAnalysis() {
   const result = search?.result || search?.progress;
   const running = search?.status === 'running';
-  const rankedDepth = result?.searchPolicy === 'transformer-ranked-depth';
+  const adaptiveDepth = result?.searchPolicy === 'transformer-adaptive-depth';
+  const rankedDepth = adaptiveDepth || result?.searchPolicy === 'transformer-ranked-depth';
   renderRankings(result);
   const liveLeader = running && rankedDepth ? result.rankings?.find(level => level.depth === 1)?.entries?.[0] : null;
   const displayedEvaluation = liveLeader || result;
@@ -462,10 +463,18 @@ function renderAnalysis() {
         ? candidateLimit === innerCandidateLimit ? `up to ${candidateLimit} candidate turns per position` : `up to ${candidateLimit} root / ${innerCandidateLimit} reply candidate turns`
         : `up to ${candidateLimit} root candidate turns`;
     }
-    const details = [`${rankedDepth ? 'Transformer ranked depth search' : alphaBeta ? 'Transformer alpha-beta search' : 'Selective transformer search'}; ${candidateScope}${Number.isFinite(legacyBeamWidth) ? `; best ${legacyBeamWidth} deepened` : ''}.`];
+    const details = [`${adaptiveDepth ? 'Transformer adaptive depth search' : rankedDepth ? 'Transformer ranked depth search' : alphaBeta ? 'Transformer alpha-beta search' : 'Selective transformer search'}; ${candidateScope}${Number.isFinite(legacyBeamWidth) ? `; best ${legacyBeamWidth} deepened` : ''}.`];
     if (rankedDepth) {
-      if (result.depthMode === 'dynamic') details.push(`Dynamic depth; current ceiling: ${result.currentMaxDepth ?? 1} turns. The top ${result.dynamicDepthThreshold ?? 20} ranks at every searched depth must be True before the ceiling increases (all ranks if fewer exist).`);
-      if (Number.isFinite(result.expansionRank)) details.push(`Shared evaluated ranks: ${result.expansionRank}.`);
+      if (result.depthMode === 'dynamic') details.push(adaptiveDepth
+        ? `Dynamic depth; current ceiling: ${result.currentMaxDepth ?? 1} turns. Leading alternatives and their strongest replies are checked before deepening.`
+        : `Dynamic depth; current ceiling: ${result.currentMaxDepth ?? 1} turns. The top ${result.dynamicDepthThreshold ?? 20} ranks at every searched depth must be True before the ceiling increases (all ranks if fewer exist).`);
+      if (adaptiveDepth) {
+        details.push('Promising branches widen gradually. Optional moves are limited to temporal moves.');
+        if (result.effectiveQuiescenceDepth) details.push(`Forcing lines extend up to ${result.effectiveQuiescenceDepth} turns beyond the current ceiling.`);
+        const leader = result.rankings?.find(level => level.depth === 1)?.entries?.[0];
+        if (leader?.generatedReplies) details.push(`Leading move: ${leader.searchedReplies} of ${leader.generatedReplies} generated replies evaluated${leader.repliesExhaustive ? '; all legal replies generated' : '; additional legal replies may exist'}.`);
+        details.push(result.model?.policyAvailable ? 'Trained component policy enabled.' : 'Value-guided component ordering.');
+      } else if (Number.isFinite(result.expansionRank)) details.push(`Shared evaluated ranks: ${result.expansionRank}.`);
       const depths = (result.depthStats || []).filter(item => item.candidates > 0 || item.trueEvaluations > 0);
       if (depths.length) details.push(`Searched moves by depth: ${depths.map(item => `${item.depth}: ${item.searchedMoves === null ? 'no candidates' : item.searchedMoves}`).join(' · ')}.`);
     }

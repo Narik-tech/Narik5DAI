@@ -2,6 +2,7 @@ import { isDeepStrictEqual } from 'node:util';
 import { setImmediate as yieldTurn } from 'node:timers/promises';
 import { certifyTerminal } from './match.js';
 import { formatAction, generateActions, positionKey, validateAction } from '../src/rules.js';
+import { COMPONENT_POLICY_VERSION, componentPolicyTargets } from '../src/transformer-policy.js';
 
 class Interrupted extends Error {
   constructor(reason) { super(reason); this.reason = reason; }
@@ -229,10 +230,14 @@ export async function generateSelfPlayGames(options = {}) {
     Object.assign(game, { plies: game.moves.length, finalPosition: clone(current), finalKey: positionKey(current) });
     const finished = game.valid && game.result !== 'UNFINISHED';
     const gameSamples = game.valid ? pending.map(row => {
+      // Only completed searches from accepted games teach the policy. An
+      // exploratory played action must never replace the searched target.
+      const policy = componentPolicyTargets(row.position, row.searchedAction);
       const normalizedSearchValue = Math.tanh(row.searchScoreWhiteCp / 1000);
       const unclampedNormalizedTarget = finished ? (1 - limits.outcomeWeight) * normalizedSearchValue + limits.outcomeWeight * game.outcomeWhite : normalizedSearchValue;
       const normalizedTarget = finished ? Math.max(-0.999, Math.min(0.999, unclampedNormalizedTarget)) : unclampedNormalizedTarget;
       return { ...row, value: finished ? 1000 * Math.atanh(normalizedTarget) : row.searchScoreWhiteCp,
+        ...(policy.length ? { policyVersion: COMPONENT_POLICY_VERSION, policy } : {}),
         targetType: finished ? 'outcome-blend' : 'search-bootstrap', normalizedSearchValue,
         normalizedTarget, unclampedNormalizedTarget, outcomeWhite: finished ? game.outcomeWhite : null, outcomeWeight: finished ? limits.outcomeWeight : 0,
         gameResult: game.result, gameReason: game.reason,

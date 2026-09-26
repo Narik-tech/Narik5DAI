@@ -184,7 +184,7 @@ export function createApp({ transformerRuntime = new TransformerRuntime(), train
           hardDeadline?.unref();
           worker.on('message', message => {
             if (job.status !== 'running') return;
-            if (message.type === 'evaluate') { void forwardInference(worker, transformerRuntime, message); return; }
+            if (message.type === 'evaluate' || message.type === 'policy') { void forwardInference(worker, transformerRuntime, message); return; }
             if (message.type === 'progress') job.progress = message.result;
             if (message.type === 'result') { job.result = message.result; job.status = 'done'; clearTimeout(hardDeadline); }
             if (message.type === 'error') { job.error = message.error; job.status = 'error'; clearTimeout(hardDeadline); }

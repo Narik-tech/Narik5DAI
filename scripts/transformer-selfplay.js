@@ -162,8 +162,9 @@ export function workerAnalyzer(runtime, shouldStop = () => false, maxConcurrency
         const deadline = setTimeout(() => finish(new Error('Search worker exceeded its hard safety deadline.')), options.timeMs + 5000);
         worker.on('message', message => {
           if (finished) return;
-          if (message.type === 'evaluate') void forwardInference(worker, {
-            evaluate: positions => inference.evaluate(positions, { signal: controller.signal }),
+          if (message.type === 'evaluate' || message.type === 'policy') void forwardInference(worker, {
+            evaluate: (positions, options) => inference.evaluate(positions, { ...options, signal: controller.signal }),
+            orderMoves: (position, moves, options) => inference.orderMoves(position, moves, { ...options, signal: controller.signal }),
           }, message);
           else if (message.type === 'result') finish(null, message.result);
           else if (message.type === 'error') finish(new Error(message.error));

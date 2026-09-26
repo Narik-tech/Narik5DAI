@@ -88,7 +88,7 @@ async function main() {
         else reject(new Error('No legal action was found before the hard time limit. Try a longer budget.'));
       }, options.timeMs + 5000);
       worker.on('message', message => {
-        if (message.type === 'evaluate') { void forwardInference(worker, runtime, message); return; }
+        if (message.type === 'evaluate' || message.type === 'policy') { void forwardInference(worker, runtime, message); return; }
         if (message.type === 'progress') {
           progress = message.result;
           if (!args.json) console.error(`depth ${progress.depth} | ${progress.score === null ? 'unscored' : (progress.score / 100).toFixed(2)} | ${progress.nodes} work nodes | ${progress.notation || 'searching'}`);

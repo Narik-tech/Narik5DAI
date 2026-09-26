@@ -7,289 +7,274 @@ const node = (depth, index, candidateScore, trueScore = null, extra = {}) => ({
   children: null, terminal: null, ...extra,
 });
 const ranked = (levels, rootSign = 1) => rankDepths(levels, rootSign);
-const choose = (levels, options = {}) => chooseWork(ranked(levels), { maxDepth: 8, ...options });
+
+function tree(rootSign = 1) {
+  let nextIndex = 0;
+  const root = { depth: 0, children: [], best: null, visits: 0 };
+  const levels = [[]];
+  function add(parent, score, isTrue = true, extra = {}) {
+    const value = score * rootSign;
+    const child = node(parent.depth + 1, nextIndex++, value, isTrue ? value : null,
+      { parent, best: null, visits: 0, ...extra });
+    (parent.children ??= []).push(child);
+    (levels[child.depth] ??= []).push(child);
+    if (isTrue) parent.best ??= child;
+    return child;
+  }
+  const rankings = () => ranked(levels, rootSign);
+  return { root, levels, add, rankings,
+    choose: (options = {}) => chooseWork(rankings(), { maxDepth: 8, root, rootSign, ...options }),
+    ready: maxDepth => canDeepen(rankings(), maxDepth, { root, rootSign }),
+  };
+}
+
+function complete(work) {
+  for (let current = work.node; current; current = current.parent) current.visits++;
+  if (work.kind === 'evaluate') {
+    work.node.trueScore = work.node.value = work.node.candidateScore;
+    work.node.parent.best ??= work.node;
+  }
+}
 
 test('depth rankings alternate the mover perspective and use backed True values', () => {
   const first = [node(1, 0, 10), node(1, 1, 90), node(1, 2, 1000, 50, { value: 70 })];
   const second = [node(2, 3, 10), node(2, 4, 90), node(2, 5, -1000, 50, { value: 70 })];
-  const white = ranked([[], first, second]);
-  assert.deepEqual(white.map(row => row.depth), [1, 2]);
-  assert.deepEqual(white[0].ranked, [first[1], first[2], first[0]]);
-  assert.deepEqual(white[1].ranked, [second[0], second[2], second[1]]);
-  const black = ranked([[], first, second], -1);
-  assert.deepEqual(black[0].ranked, [first[0], first[2], first[1]]);
-  assert.deepEqual(black[1].ranked, [second[1], second[2], second[0]]);
+  assert.deepEqual(ranked([[], first, second]).map(row => row.ranked),
+    [[first[1], first[2], first[0]], [second[0], second[2], second[1]]]);
+  assert.deepEqual(ranked([[], first, second], -1).map(row => row.ranked),
+    [[first[0], first[2], first[1]], [second[1], second[2], second[0]]]);
 });
 
-test('equal values retain deterministic insertion order without mutating level arrays', () => {
+test('equal values retain insertion order without mutating level arrays', () => {
   const first = node(1, 0, 10), second = node(1, 1, 10, 10), third = node(1, 2, 10);
   const level = [third, first, second];
   assert.deepEqual(ranked([[], level])[0].ranked, [first, second, third]);
   assert.deepEqual(level, [third, first, second]);
 });
 
-test('later depths prioritize the current parent rank before sibling scores for either root color', () => {
-  const first = node(1, 0, 100, 100), second = node(1, 1, 50, 50);
-  const firstLow = node(2, 2, -20, null, { parent: first });
-  const firstHigh = node(2, 3, 20, 20, { parent: first });
-  const secondLow = node(2, 4, -10000, -10000, { parent: second });
-  const secondHigh = node(2, 5, 10000, null, { parent: second });
-  const levels = [[], [second, first], [secondLow, firstHigh, secondHigh, firstLow]];
-  assert.deepEqual(ranked(levels)[1].ranked, [firstLow, firstHigh, secondLow, secondHigh],
-    'White prefers the first parent; Black replies sort by increasing score within each parent');
-  assert.deepEqual(ranked(levels, -1)[1].ranked, [secondHigh, secondLow, firstHigh, firstLow],
-    'Black prefers the second parent; White replies sort by decreasing score within each parent');
+test('display rankings propagate parent priority after backed values change', () => {
+  for (const rootSign of [1, -1]) {
+    const graph = tree(rootSign);
+    const first = graph.add(graph.root, 100), second = graph.add(graph.root, 50);
+    const reply = graph.add(first, 10), otherReply = graph.add(second, -1000);
+    const continuation = graph.add(reply, 20), otherContinuation = graph.add(otherReply, 10000);
+    assert.deepEqual(graph.rankings()[1].ranked, [reply, otherReply]);
+    assert.deepEqual(graph.rankings()[2].ranked, [continuation, otherContinuation]);
+    first.value = 0;
+    assert.deepEqual(graph.rankings()[1].ranked, [otherReply, reply]);
+    assert.deepEqual(graph.rankings()[2].ranked, [otherContinuation, continuation]);
+  }
 });
 
-test('parent priority propagates recursively and reranks descendants after backed values change', () => {
-  const first = node(1, 0, 100, 100), second = node(1, 1, 50, 50);
-  const firstReply = node(2, 2, -20, -20, { parent: first });
-  const secondReply = node(2, 3, 20, 20, { parent: first });
-  const otherReply = node(2, 4, -1000, -1000, { parent: second });
-  const firstLow = node(3, 5, 10, null, { parent: firstReply });
-  const firstHigh = node(3, 6, 30, null, { parent: firstReply });
-  const secondChild = node(3, 7, 1000, null, { parent: secondReply });
-  const otherChild = node(3, 8, 10000, null, { parent: otherReply });
-  const levels = [[], [first, second], [firstReply, secondReply, otherReply],
-    [otherChild, secondChild, firstLow, firstHigh]];
-  assert.deepEqual(ranked(levels)[2].ranked, [firstHigh, firstLow, secondChild, otherChild]);
-  firstReply.value = 40;
-  assert.deepEqual(ranked(levels)[2].ranked, [secondChild, firstHigh, firstLow, otherChild],
-    'a changed depth-two parent rank immediately changes depth-three priority');
-  first.value = 0;
-  const reranked = ranked(levels);
-  assert.deepEqual(reranked[1].ranked, [otherReply, secondReply, firstReply]);
-  assert.deepEqual(reranked[2].ranked, [otherChild, secondChild, firstHigh, firstLow],
-    'a changed root parent rank propagates through all later depths');
+test('Searched Moves remains the displayed True prefix, independent of work allocation', () => {
+  const graph = tree();
+  const leader = graph.add(graph.root, 90), candidate = graph.add(graph.root, 80, false);
+  graph.add(graph.root, 70);
+  assert.equal(graph.rankings()[0].searchedMoves, 1);
+  leader.value = 50;
+  assert.equal(graph.rankings()[0].searchedMoves, 0);
+  assert.equal(graph.rankings()[0].candidate, candidate);
+  complete({ kind: 'evaluate', node: candidate });
+  assert.equal(graph.rankings()[0].searchedMoves, Infinity);
 });
 
-test('the ranked True prefix and chosen work follow parent priority', () => {
-  const first = node(1, 0, 100, 100, { children: [] });
-  const second = node(1, 1, 50, 50, { children: [] });
-  const leadingCandidate = node(2, 2, 1000, null, { parent: first });
-  const otherTrue = node(2, 3, -1000, -1000, { parent: second });
-  const levels = [[], [first, second], [otherTrue, leadingCandidate]];
-  assert.equal(ranked(levels)[1].searchedMoves, 0,
-    'a True evaluation under a lower-ranked parent does not extend the prefix');
-  assert.deepEqual(choose(levels), { kind: 'evaluate', node: leadingCandidate });
-  first.value = 0;
-  assert.equal(ranked(levels)[1].searchedMoves, 1);
-  assert.deepEqual(choose(levels), { kind: 'expand', node: otherTrue },
-    'after its parent takes the lead, the True continuation is eligible for expansion');
+test('initial root coverage evaluates three current contenders before expansion', () => {
+  for (const rootSign of [1, -1]) {
+    const graph = tree(rootSign);
+    const roots = Array.from({ length: 8 }, (_, index) => graph.add(graph.root, 100 - index, false));
+    for (const contender of roots.slice(0, 3)) {
+      const work = graph.choose();
+      assert.deepEqual(work, { kind: 'evaluate', node: contender });
+      complete(work);
+    }
+    assert.deepEqual(graph.choose(), { kind: 'expand', node: roots[0] });
+    assert.equal(roots[3].trueScore, null, 'remaining root breadth does not block reply search');
+  }
 });
 
-test('Searched Moves counts only the True prefix and changes when scores are backed up', () => {
-  const strongest = node(1, 0, 90, 90);
-  const candidate = node(1, 1, 80);
-  const weakerTrue = node(1, 2, 70, 70);
-  const weakestCandidate = node(1, 3, 10);
-  const levels = [[], [strongest, candidate, weakerTrue, weakestCandidate]];
-  let row = ranked(levels)[0];
-  assert.equal(row.searchedMoves, 1, 'a True evaluation after the first candidate is not counted');
-  assert.equal(row.candidate, candidate);
-  strongest.value = 50;
-  row = ranked(levels)[0];
-  assert.equal(row.searchedMoves, 0, 'a backed value can move the former leader below a candidate');
-  assert.equal(row.candidate, candidate);
-  candidate.trueScore = 60;
-  candidate.value = 60;
-  row = ranked(levels)[0];
-  assert.equal(row.searchedMoves, 3);
-  assert.equal(row.candidate, weakestCandidate);
+test('two strongest replies to every contender precede a deeper principal variation', () => {
+  const graph = tree();
+  const roots = [100, 90, 80].map(score => graph.add(graph.root, score));
+  const expected = [];
+  for (const parent of roots) {
+    const replies = [-100, 0, 100].map(score => graph.add(parent, score, false));
+    expected.push(...replies.slice(0, 2));
+  }
+  for (const reply of expected) {
+    const work = graph.choose();
+    assert.deepEqual(work, { kind: 'evaluate', node: reply });
+    complete(work);
+  }
+  assert.equal(graph.choose().kind, 'expand', 'the scheduler can now deepen an evaluated reply');
 });
 
-test('candidate evaluation chooses the least-searched depth and then the shallower tie', () => {
-  const rootTrue = node(1, 0, 100, 100), rootCandidate = node(1, 1, 50);
-  const replyCandidate = node(2, 2, -100), otherReply = node(2, 3, -50);
-  const deeperCandidate = node(3, 4, 100);
-  const levels = [[], [rootTrue, rootCandidate], [otherReply, replyCandidate], [deeperCandidate]];
-  assert.deepEqual(choose(levels), { kind: 'evaluate', node: replyCandidate });
-  replyCandidate.trueScore = -100;
-  replyCandidate.value = -100;
-  assert.deepEqual(choose(levels), { kind: 'evaluate', node: deeperCandidate });
+test('root contender membership responds immediately to backed score changes', () => {
+  const graph = tree();
+  const roots = [100, 90, 80, 70].map(score => graph.add(graph.root, score));
+  for (const parent of roots.slice(0, 3)) graph.add(parent, 0, true, { children: [] });
+  roots[0].value = -1000;
+  assert.deepEqual(graph.choose(), { kind: 'expand', node: roots[3] });
 });
 
-test('a single True leader can expand immediately with a common prefix of one', () => {
-  const first = node(1, 0, 100, 100), second = node(1, 1, 90);
-  const levels = [[], [first, second]];
-  assert.deepEqual(choose(levels), { kind: 'expand', node: first });
-  first.children = [];
-  assert.deepEqual(choose(levels), { kind: 'evaluate', node: second });
+test('progressive widening waits between batches and widens an exhausted root', () => {
+  const graph = tree();
+  graph.root.canWiden = true;
+  const roots = Array.from({ length: 8 }, (_, index) => graph.add(graph.root, 100 - index));
+  for (const parent of roots.slice(0, 3)) graph.add(parent, 0);
+  graph.root.visits = 23;
+  assert.notEqual(graph.choose().kind, 'widen');
+  graph.root.visits = 24;
+  assert.deepEqual(graph.choose(), { kind: 'widen', node: graph.root });
+  graph.root.visits = 1;
+  assert.deepEqual(graph.choose({ maxDepth: 1 }), { kind: 'widen', node: graph.root });
+  graph.root.generationDone = true;
+  assert.equal(graph.choose({ maxDepth: 1 }), null);
 });
 
-test('the common prefix grows dynamically and permits the matching one-based rank', () => {
-  const first = node(1, 0, 100, 100, { children: [] });
-  const second = node(1, 1, 90, 90), third = node(1, 2, 80);
-  const replyFirst = node(2, 3, -100, -100, { children: [] });
-  const replySecond = node(2, 4, -90), replyThird = node(2, 5, -80);
-  const levels = [[], [first, second, third], [replyFirst, replySecond, replyThird]];
-  assert.deepEqual(choose(levels), { kind: 'evaluate', node: replySecond },
-    'rank two waits while another depth only has a one-entry True prefix');
-  replySecond.trueScore = -90;
-  replySecond.value = -90;
-  assert.deepEqual(choose(levels), { kind: 'expand', node: second },
-    'two True leaders at every pending depth permit rank two, with a shallower tie');
+test('fixed depth one evaluates later widening batches to exhaustion', () => {
+  const graph = tree();
+  graph.root.canWiden = true;
+  for (let index = 0; index < 8; index++) graph.add(graph.root, -index, false);
+  let evaluated = 0, widened = 0;
+  for (let steps = 0; steps < 100; steps++) {
+    const work = graph.choose({ maxDepth: 1 });
+    if (!work) break;
+    complete(work);
+    if (work.kind === 'evaluate') evaluated++;
+    else {
+      assert.equal(work.kind, 'widen');
+      widened++;
+      for (let index = 8; index < 16; index++) graph.add(graph.root, -index, false);
+      graph.root.canWiden = false;
+      graph.root.generationDone = true;
+    }
+  }
+  assert.equal(evaluated, 16);
+  assert.equal(widened, 1);
+  assert.equal(graph.choose({ maxDepth: 1 }), null);
 });
 
-test('an under-searched deeper frontier delays expansion of shallower True evaluations', () => {
-  const first = node(1, 0, 100, 100), second = node(1, 1, 90, 90), third = node(1, 2, 80, 80);
-  const shallowCandidate = node(1, 3, 70), deepCandidate = node(2, 4, -50);
-  assert.deepEqual(choose([[], [first, second, third, shallowCandidate], [deepCandidate]]),
-    { kind: 'evaluate', node: deepCandidate });
+test('periodic exploration reaches very weak branches and finite work completes', () => {
+  const graph = tree();
+  const roots = [0, -5000, -10000, -15000].map(score => graph.add(graph.root, score, false));
+  let fourthVisitedAt = null, evaluations = 0, expansions = 0, steps = 0;
+  for (; steps < 500; steps++) {
+    const work = graph.choose({ maxDepth: 3 });
+    if (!work) break;
+    complete(work);
+    if (work.kind === 'evaluate') {
+      evaluations++;
+      if (work.node === roots[3]) fourthVisitedAt = steps;
+    } else {
+      assert.equal(work.kind, 'expand');
+      expansions++;
+      for (let index = 0; index < 4; index++) graph.add(work.node, work.node.candidateScore - index, false);
+    }
+  }
+  assert.ok(fourthVisitedAt < 25, `weak root move was evaluated at operation ${fourthVisitedAt}`);
+  assert.equal(evaluations, 4 + 16 + 64);
+  assert.equal(expansions, 4 + 16);
+  assert.ok(steps < 500);
 });
 
-test('expansion prioritizes one-based ranking before depth and uses shallower depth for ties', () => {
-  const first = node(1, 0, 100, 100, { children: [] });
-  const second = node(1, 1, 90, 90), third = node(1, 2, 80, 80);
-  const deeperFirst = node(2, 3, -100, -100), deeperSecond = node(2, 4, -90, -90);
-  const levels = [[], [first, second, third], [deeperFirst, deeperSecond]];
-  assert.deepEqual(choose(levels), { kind: 'expand', node: deeperFirst });
-  first.children = null;
-  assert.deepEqual(choose(levels), { kind: 'expand', node: first });
+test('equal-score branching eight reaches depth eight with selective work', () => {
+  const graph = tree();
+  for (let index = 0; index < 8; index++) graph.add(graph.root, 0, false);
+  let deepestEvaluation = 0, steps = 0;
+  for (; steps < 80 && deepestEvaluation < 8; steps++) {
+    const work = graph.choose({ maxDepth: 8 });
+    assert.ok(work);
+    complete(work);
+    if (work.kind === 'evaluate') deepestEvaluation = Math.max(deepestEvaluation, work.node.depth);
+    else for (let index = 0; index < 8; index++) graph.add(work.node, 0, false);
+  }
+  assert.equal(deepestEvaluation, 8,
+    'equal neural scores must not turn the entire eight-way tree into breadth-first search');
+  assert.ok(steps < 80);
+  assert.ok(graph.root.children.slice(0, 3).every(child => child.children?.filter(reply => reply.trueScore !== null).length >= 2),
+    'selective depth retains initial defensive coverage under three root contenders');
 });
 
-test('exhausted short depths do not block deeper expansion', () => {
-  const first = node(1, 0, 100, 100, { children: [] });
-  const reply = node(2, 1, -10, -10);
-  const levels = [[], [first], [reply]];
-  assert(ranked(levels).every(row => row.searchedMoves === Infinity));
-  assert.deepEqual(choose(levels), { kind: 'expand', node: reply });
+test('forcing callback permits bounded extensions and optional evaluation gating', () => {
+  const graph = tree();
+  const first = graph.add(graph.root, 0, true, { forcing: true });
+  assert.equal(graph.choose({ maxDepth: 1 }), null);
+  const canExpand = node => node.forcing && node.depth < 3;
+  assert.deepEqual(graph.choose({ maxDepth: 1, canExpand }), { kind: 'expand', node: first });
+  const reply = graph.add(first, 0, false, { forcing: true });
+  assert.deepEqual(graph.choose({ maxDepth: 1, canExpand }), { kind: 'evaluate', node: reply });
+  assert.equal(graph.choose({ maxDepth: 1, canExpand, canEvaluate: () => false }), null);
+  complete({ kind: 'evaluate', node: reply });
+  assert.deepEqual(graph.choose({ maxDepth: 1, canExpand }), { kind: 'expand', node: reply });
+  const leaf = graph.add(reply, 0, true, { forcing: true });
+  assert.equal(graph.choose({ maxDepth: 1, canExpand }), null);
+  assert.equal(leaf.depth, 3);
 });
 
-test('only True, unexpanded, nonterminal nodes inside the common prefix can expand', () => {
-  const terminal = node(1, 0, 100, 100, { terminal: { score: 100 } });
-  const expanded = node(1, 1, 90, 90, { children: [] });
-  const outsideRank = node(1, 2, 80, 80);
-  const candidate = node(1, 3, 70, null, { value: 1000 });
-  const replyFirst = node(2, 4, -100, -100, { terminal: { score: -100 } });
-  const replySecond = node(2, 5, -90, -90, { children: [] });
-  const replyCandidate = node(2, 6, -80);
-  const levels = [[], [terminal, expanded, outsideRank, candidate], [replyFirst, replySecond, replyCandidate]];
-  assert.deepEqual(choose(levels), { kind: 'evaluate', node: replyCandidate },
-    'with no expansion inside the common prefix, pending candidates still make progress');
-  outsideRank.children = [];
-  replyCandidate.trueScore = -80;
-  replyCandidate.value = -80;
-  replyCandidate.children = [];
-  assert.deepEqual(choose(levels), { kind: 'evaluate', node: candidate },
-    'a candidate with an incidental value remains unevaluated');
-  candidate.trueScore = 70;
-  candidate.value = 70;
-  candidate.children = [];
-  assert.equal(choose(levels), null, 'closed frontiers finish once every candidate has been evaluated');
+test('terminal and proven nodes are not expanded or widened', () => {
+  const graph = tree();
+  graph.add(graph.root, 100, true, { terminal: { score: 100 }, canWiden: true });
+  graph.add(graph.root, 90, true, { mateProven: true, canWiden: true });
+  assert.equal(graph.choose(), null);
 });
 
-test('exhausted depths allow expansion beyond an earlier finite prefix', () => {
-  const first = node(1, 0, 100, 100, { children: [] });
-  const second = node(1, 1, 90, 90, { children: [] });
-  const third = node(1, 2, 80, 80);
-  const reply = node(2, 3, -10, -10, { children: [] });
-  assert.deepEqual(choose([[], [first, second, third], [reply]]), { kind: 'expand', node: third },
-    'a shorter exhausted depth has no remaining candidate that can block rank three');
+test('standalone roots can be derived and empty frontiers finish', () => {
+  const first = node(1, 0, 100, 100);
+  assert.deepEqual(chooseWork(ranked([[], [first]]), { maxDepth: 2 }), { kind: 'expand', node: first });
+  assert.equal(chooseWork([], { maxDepth: 8 }), null);
 });
 
-test('max depth permits candidate evaluation but prevents another expansion', () => {
-  const leaf = node(1, 0, 100, 100);
-  assert.equal(choose([[], [leaf]], { maxDepth: 1 }), null);
-  const candidate = node(1, 1, 90);
-  assert.deepEqual(choose([[], [leaf, candidate]], { maxDepth: 1 }), { kind: 'evaluate', node: candidate });
+test('dynamic depth opens after three root contenders, not a global breadth quota', () => {
+  const graph = tree();
+  const roots = Array.from({ length: 8 }, (_, index) => graph.add(graph.root, -index, index < 2));
+  assert.equal(DYNAMIC_DEPTH_THRESHOLD, 3);
+  assert.equal(graph.ready(1), false);
+  complete({ kind: 'evaluate', node: roots[2] });
+  assert.equal(graph.ready(1), true);
+  assert.equal(roots[3].trueScore, null);
+  assert.equal(graph.ready(2), false, 'a new ceiling must earn actual continuation coverage');
 });
 
-test('empty frontiers finish without a work item', () => {
-  assert.deepEqual(ranked([[], [], []]), []);
-  assert.equal(choose([[], [], []]), null);
+test('dynamic readiness requires replies under each contender and principal progress', () => {
+  const graph = tree();
+  const roots = [100, 90, 80].map(score => graph.add(graph.root, score));
+  const replies = roots.map(parent => [graph.add(parent, -10), graph.add(parent, 0)]);
+  assert.equal(graph.ready(2), true);
+  replies[2][1].trueScore = null;
+  assert.equal(graph.ready(2), false, 'many replies elsewhere cannot substitute for the third contender');
+  replies[2][1].trueScore = 0;
+  graph.add(replies[0][0], 10);
+  graph.add(replies[1][0], 10);
+  assert.equal(graph.ready(3), false);
+  graph.add(replies[2][0], 10);
+  assert.equal(graph.ready(3), true);
 });
 
-function depthLevel(depth, truePrefix, total = 25) {
-  const side = depth % 2 ? 1 : -1;
-  return Array.from({ length: total }, (_, index) => {
-    const score = side * (1000 - index * 10);
-    return node(depth, depth * 100 + index, score, index < truePrefix ? score : null);
-  });
-}
-
-test('dynamic depth requires twenty leading True evaluations, with nineteen insufficient', () => {
-  assert.equal(DYNAMIC_DEPTH_THRESHOLD, 20);
-  assert.equal(canDeepen(ranked([[], depthLevel(1, 19)]), 1), false);
-  assert.equal(canDeepen(ranked([[], depthLevel(1, 20)]), 1), true);
+test('dynamic readiness permits short resolved lines, but not unfinished reply generation', () => {
+  const graph = tree();
+  const parent = graph.add(graph.root, 100);
+  const reply = graph.add(parent, 0);
+  assert.equal(graph.ready(2), true, 'a fully generated one-reply branch is sufficient');
+  parent.canWiden = true;
+  assert.equal(graph.ready(2), false);
+  parent.canWiden = false;
+  reply.terminal = { score: 0 };
+  assert.equal(graph.ready(2), false, 'entirely resolved lines do not need a deeper ceiling');
+  graph.add(graph.root, 90, true, { terminal: { score: 90 } });
+  reply.terminal = null;
+  assert.equal(graph.ready(2), true);
 });
 
-test('True evaluations after the first Candidate do not satisfy dynamic depth readiness', () => {
-  const level = depthLevel(1, 19);
-  for (const entry of level.slice(20)) entry.trueScore = entry.value = entry.candidateScore;
-  assert.equal(level.filter(entry => entry.trueScore !== null).length, 24);
-  const rankings = ranked([[], level]);
-  assert.equal(rankings[0].searchedMoves, 19);
-  assert.equal(canDeepen(rankings, 1), false);
-});
-
-test('dynamic depth requires the prefix at every active depth and ignores future levels', () => {
-  const first = depthLevel(1, 20), second = depthLevel(2, 19), future = depthLevel(3, 0);
-  const levels = [[], first, second, future];
-  assert.equal(canDeepen(ranked(levels), 2), false);
-  second[19].trueScore = second[19].value = second[19].candidateScore;
-  assert.equal(canDeepen(ranked(levels), 2), true, 'both searched depths now have twenty True leaders');
-  assert.equal(canDeepen(ranked(levels), 3), false, 'a newly active depth must earn its own prefix');
-  first[19].trueScore = first[19].value = null;
-  assert.equal(canDeepen(ranked(levels), 2), false, 'a shorter depth can also block advancement');
-});
-
-test('dynamic readiness uses current rankings after backed scores change', () => {
-  const level = depthLevel(1, 20);
-  assert.equal(canDeepen(ranked([[], level]), 1), true);
-  level[0].value = -100;
-  assert.equal(canDeepen(ranked([[], level]), 1), false,
-    'a True value falling below the leading Candidate reduces the current prefix');
-  level[0].value = level[0].trueScore;
-  assert.equal(canDeepen(ranked([[], level]), 1), true);
-});
-
-test('dynamic readiness uses the hierarchical prefix and responds to parent rank changes', () => {
-  const first = node(1, 0, 100, 100), second = node(1, 1, 50, 50);
-  const trueChildren = Array.from({ length: 20 }, (_, index) =>
-    node(2, index + 2, 1000 + index, 1000 + index, { parent: first }));
-  const candidate = node(2, 22, -1000, null, { parent: second });
-  const levels = [[], [first, second], [candidate, ...trueChildren]];
-  assert.equal(ranked(levels)[1].searchedMoves, 20);
-  assert.equal(canDeepen(ranked(levels), 2), true,
-    'twenty True continuations of the higher-ranked parent satisfy readiness');
-  first.value = 0;
-  assert.equal(ranked(levels)[1].searchedMoves, 0);
-  assert.equal(canDeepen(ranked(levels), 2), false,
-    'twenty existing True evaluations do not suffice after a pending parent takes priority');
-});
-
-test('short exhausted depths count as ready when all their available entries are True', () => {
-  const levels = [[], depthLevel(1, 3, 3), depthLevel(2, 2, 2)];
-  assert(ranked(levels).every(level => level.searchedMoves === Infinity));
-  assert.equal(canDeepen(ranked(levels), 2), true);
-  levels[2][1].trueScore = levels[2][1].value = null;
-  assert.equal(canDeepen(ranked(levels), 2), false, 'a short frontier must finish every available entry');
-});
-
-test('empty rankings and a missing current ceiling cannot advance dynamic depth', () => {
+test('dynamic readiness handles reranking, missing frontiers, and depth ceiling 64', () => {
+  const graph = tree();
+  const roots = [100, 90, 80].map(score => graph.add(graph.root, score));
+  const pending = graph.add(graph.root, 70, false);
+  assert.equal(graph.ready(1), true);
+  roots[0].value = 0;
+  assert.equal(graph.ready(1), false);
+  complete({ kind: 'evaluate', node: pending });
+  assert.equal(graph.ready(1), true);
+  assert.equal(graph.ready(2), false);
+  assert.equal(graph.ready(64), false);
   assert.equal(canDeepen([], 1), false);
-  assert.equal(canDeepen(ranked([[], [], []]), 1), false);
-  const rankings = ranked([[], depthLevel(1, 3, 3)]);
-  assert.equal(canDeepen(rankings, 1), true);
-  assert.equal(canDeepen(rankings, 2), false, 'advancement waits for actual candidates at the new ceiling');
-});
-
-test('terminal-only frontiers cannot repeatedly advance the dynamic ceiling', () => {
-  const level = depthLevel(1, 3, 3);
-  for (const entry of level) entry.terminal = { score: 0 };
-  const rankings = ranked([[], level]);
-  assert.equal(canDeepen(rankings, 1), true);
-  assert.equal(chooseWork(rankings, { maxDepth: 2 }), null, 'no terminal node can expand after raising the ceiling');
-  assert.equal(canDeepen(rankings, 2), false, 'the absent new frontier prevents another increment');
-});
-
-test('dynamic depth can reach the engine limit but never advance beyond sixty-four', () => {
-  const levels = [];
-  levels[63] = depthLevel(63, 20);
-  assert.equal(canDeepen(ranked(levels), 63), true);
-  levels[64] = depthLevel(64, 20);
-  assert.equal(canDeepen(ranked(levels), 64), false);
-  levels[65] = depthLevel(65, 20);
-  assert.equal(canDeepen(ranked(levels), 65), false);
 });

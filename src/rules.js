@@ -390,22 +390,44 @@ export function* generateActions(position, options = {}) {
   } finally { steps.return?.(); }
 }
 
-/** The same legal traversal, with an awaitable orderMoves(current, moves, prefix) hook. */
+/**
+ * The same legal traversal, with an awaitable orderMoves hook. The hook may
+ * also return an async iterable of move batches: later batches are requested
+ * only after earlier branches have been visited, keeping inference resumable.
+ */
 export async function* generateActionsAsync(position, options = {}) {
   const steps = generateActionSteps(position, options);
   const orderMoves = options.orderMoves;
+  const batches = new Set();
+  async function nextBatch(iterator) {
+    const next = await iterator.next();
+    if (next.done) batches.delete(iterator);
+    return { moves: next.done ? [] : next.value, more: next.done ? null : iterator };
+  }
   try {
     let step = steps.next();
     while (!step.done) {
       if (step.value.candidate) {
         yield step.value.candidate;
         step = steps.next();
+      } else if (step.value.nextBatch) {
+        step = steps.next(await nextBatch(step.value.nextBatch));
       } else {
         const { current, moves, prefix } = step.value;
-        step = steps.next(orderMoves ? await orderMoves(current, moves, prefix.slice()) : moves);
+        const ordered = orderMoves ? await orderMoves(current, moves, prefix.slice()) : moves;
+        if (ordered?.[Symbol.asyncIterator]) {
+          const iterator = ordered[Symbol.asyncIterator]();
+          batches.add(iterator);
+          step = steps.next(await nextBatch(iterator));
+        } else step = steps.next(ordered);
       }
     }
-  } finally { steps.return?.(); }
+  } finally {
+    steps.return?.();
+    // Close every nested ordering generator even when inference or a search
+    // budget throws while a parent batch is suspended.
+    await Promise.all([...batches].map(iterator => iterator.return?.()));
+  }
 }
 
 // Both drivers share every legality, deduplication and pruning decision. The
@@ -479,12 +501,17 @@ function* generateActionSteps(position, { tick = () => {}, preferredAction = nul
       const active = raw.boardFuncs.active(current.board);
       if (!availableMoves(current, false).some(move => !active.includes(move[0][0]) && isTacticalMove(current, move))) return;
     }
-    const orderedMoves = yield { current, moves, prefix: path };
-    for (const move of orderedMoves) {
-      tick();
-      path.push(move);
-      yield* visit(applyMove(current, move), tacticalOnly && (hasTacticalMove || isTacticalMove(current, move)));
-      path.pop();
+    let ordered = yield { current, moves, prefix: path };
+    while (ordered) {
+      const batch = Object.hasOwn(ordered, 'more') ? ordered.moves : ordered;
+      for (const move of batch) {
+        tick();
+        path.push(move);
+        yield* visit(applyMove(current, move), tacticalOnly && (hasTacticalMove || isTacticalMove(current, move)));
+        path.pop();
+      }
+      if (!ordered.more) break;
+      ordered = yield { nextBatch: ordered.more };
     }
   }
   yield* visit(position);

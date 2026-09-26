@@ -22,6 +22,28 @@ function submit(queue, id, controller = new AbortController()) {
   return { controller, promise: queue.evaluate([{ id }], { signal: controller.signal }) };
 }
 
+test('policy ordering shares the value queue and cancelled policy requests never dispatch', async () => {
+  const requests = [];
+  const run = (kind, input) => new Promise((resolve, reject) => requests.push({kind, input, resolve, reject}));
+  const queue = createInferenceQueue({evaluate: positions => run('value', positions),
+    orderMoves: (position, moves) => run('policy', {position, moves})});
+  const signal = new AbortController().signal, cancelled = new AbortController();
+  const value = queue.evaluate([{id:1}], {signal});
+  const policy = queue.orderMoves({id:2}, ['a', 'b'], {signal});
+  const dropped = assert.rejects(queue.orderMoves({id:3}, ['c'], {signal:cancelled.signal}), {name:'AbortError'});
+  cancelled.abort();
+  await dropped;
+  assert.deepEqual(requests.map(request => request.kind), ['value']);
+  requests[0].resolve({values:[42]});
+  await value;
+  assert.deepEqual(requests.map(request => request.kind), ['value', 'policy']);
+  assert.deepEqual(requests[1].input, {position:{id:2}, moves:['a', 'b']});
+  requests[1].resolve([-1, 2]);
+  assert.deepEqual(await policy, [-1, 2]);
+  await nextTurn();
+  assert.equal(requests.length, 2);
+});
+
 test('self-play inference dispatches one runtime request at a time in arrival order', async () => {
   const fixture = controlledRuntime();
   const first = submit(fixture.queue, 1), second = submit(fixture.queue, 2), third = submit(fixture.queue, 3);

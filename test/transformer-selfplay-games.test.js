@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { generateSelfPlayGames } from '../scripts/transformer-selfplay-games.js';
 import { certifyTerminal } from '../scripts/match.js';
 import { analyze } from '../src/transformer-search.js';
-import { createPosition, generateActions, positionKey, validateAction } from '../src/rules.js';
+import { applyMove, createPosition, generateActions, positionKey, validateAction } from '../src/rules.js';
 
 const limits = { games: 1, maxPlies: 2, timeMs: 3000, maxNodes: 20000, maxDepth: 1, exploration: 0 };
 const starts = () => [{ id: 'standard', position: createPosition() }];
@@ -239,8 +239,37 @@ test('seeded epsilon exploration is reproducible and preserves the searched-root
   assert(first.games.flatMap(game => game.moves).every(row => row.exploration.explored));
   assert(first.samples.some(row => !assertSame(row.playedAction, row.searchedAction)));
   assert(first.samples.every(row => row.value === 250 && row.searchScoreWhiteCp === 250));
+  for (const row of first.samples) {
+    assert.equal(row.policyVersion, 1);
+    assert(row.policy.length > 0);
+    let prefix = row.position;
+    for (const [index, action] of row.searchedAction.entries()) {
+      const label = row.policy.find(item => item.componentIndex === index);
+      if (label) {
+        assert.deepEqual(label.position ?? row.position, prefix);
+        assert.deepEqual(label.moves[label.target], action);
+      }
+      prefix = applyMove(prefix, action);
+    }
+  }
   for (const game of first.games) replay(game);
   function assertSame(a, b) { return JSON.stringify(a) === JSON.stringify(b); }
+});
+
+test('compound self-play policy targets retain searched prefix order across boards', async () => {
+  const position = createPosition({variant:'two_timelines'});
+  const result = await generateSelfPlayGames({...limits, positions:[{id:'compound', position}], maxPlies:1,
+    analyzePosition: position => firstLegal(position)});
+  assert.equal(result.samples.length, 1);
+  const row = result.samples[0];
+  assert.equal(row.policy.length, row.searchedAction.length);
+  assert(row.policy.length > 1);
+  let prefix = row.position;
+  for (const [index, label] of row.policy.entries()) {
+    assert.deepEqual(label.position ?? row.position, prefix);
+    assert.deepEqual(label.moves[label.target], row.searchedAction[index]);
+    prefix = applyMove(prefix, row.searchedAction[index]);
+  }
 });
 
 test('incomplete search scores are never used as training targets', async () => {

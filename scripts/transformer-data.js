@@ -3,6 +3,7 @@ import { dirname, resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { analyze } from '../src/search.js';
 import { createPosition, generateActions, positionKey, validateAction } from '../src/rules.js';
+import { COMPONENT_POLICY_VERSION, componentPolicyTargets } from '../src/transformer-policy.js';
 
 function seededRandom(seed) {
   let state = seed >>> 0;
@@ -64,9 +65,11 @@ export async function generateTrainingData({ output = 'artifacts/transformer/tra
             stoppedReason: result.stoppedReason, elapsedMs: result.elapsedMs, limits: result.limits },
           source, trajectory, ply, seed,
         };
+        const policy = result.completed ? componentPolicyTargets(current, result.bestAction) : [];
+        if (policy.length) Object.assign(record, { policyVersion: COMPONENT_POLICY_VERSION, policy });
         await file.writeFile(`${JSON.stringify(record)}\n`);
         seen.add(key); written++;
-        if (written % 32 === 0 || written === samples) console.error(`Teacher labels: ${written}/${samples}; approximate White centipawns, not game outcomes.`);
+        if (written % 32 === 0 || written === samples) console.error(`Teacher labels: ${written}/${samples}; approximate White centipawns and component policy targets, not game outcomes.`);
       }
       let action = result.bestAction;
       // Mix teacher play with legal exploration to avoid a single narrow line.
@@ -77,7 +80,7 @@ export async function generateTrainingData({ output = 'artifacts/transformer/tra
     if (written !== samples) throw new Error(`Only ${written}/${samples} distinct scored positions within the bounded attempt limit. Increase --nodes or reduce --samples.`);
     await file.close();
     await rename(temporary, destination);
-    return { output: destination, samples: written, attempts, seed, teacherNodes: nodes, teacherTimeMs: timeMs };
+    return { output: destination, samples: written, attempts, seed, teacherNodes: nodes, teacherTimeMs: timeMs, policyVersion: COMPONENT_POLICY_VERSION };
   } catch (error) {
     await file.close().catch(() => {});
     await rm(temporary, { force: true });

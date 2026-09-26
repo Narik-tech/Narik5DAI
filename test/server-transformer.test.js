@@ -89,6 +89,35 @@ test('inference error is surfaced, never converted into a classical result', asy
   assert.equal(job.result, undefined);
 });
 
+test('worker routes trained component policy and pins both inference types to its model generation', async t => {
+  const runtime = mockRuntime();
+  let policies = 0, values = 0;
+  runtime.start = async () => ({ device: 'test', model: { device: 'test', trainedSteps: 1,
+    policyAvailable: true, policyTrainedSteps: 1, policyVersion: 1, runtimeGeneration: 7 } });
+  runtime.orderMoves = async (position, moves, options) => {
+    assert.equal(options.runtimeGeneration, 7);
+    assert.equal(options.withMetadata, true);
+    assert(Array.isArray(position.board));
+    assert(moves.every(move => move.length >= 2));
+    policies++;
+    return { scores: moves.map((_, index) => -index), runtimeGeneration: 7 };
+  };
+  runtime.evaluate = async (positions, options) => {
+    assert.equal(options.runtimeGeneration, 7);
+    values++;
+    return { values: positions.map(() => 0), runtimeGeneration: 7 };
+  };
+  const { request, wait } = await fixture(t, runtime);
+  const game = (await request('/api/game')).data;
+  const created = await request('/api/analyze', { engine: 'transformer', timeMs: 1000, maxDepth: 1 });
+  const job = await wait(created.data.jobId);
+  assert.equal(job.status, 'done', job.error);
+  assert.equal(job.result.policyCalls, policies);
+  assert(policies > 0 && values > 0);
+  assert.equal(job.result.model.runtimeGeneration, 7);
+  assert.equal((await request('/api/play', { jobId: created.data.jobId, revision: game.revision })).status, 200);
+});
+
 test('zero think time survives the hard-deadline grace period and can be stopped', { timeout: 15000 }, async t => {
   const runtime = mockRuntime();
   let release, started;
@@ -138,7 +167,7 @@ test('transformer accepts dynamic and deeper depth while classical retains its d
   assert.equal(dynamicJob.result.limits.maxDepth, 0);
   assert.equal(dynamicJob.result.depthMode, 'dynamic');
   assert.equal(dynamicJob.result.currentMaxDepth, 1);
-  assert.equal(dynamicJob.result.dynamicDepthThreshold, 20);
+  assert.equal(dynamicJob.result.dynamicDepthThreshold, 3);
 });
 
 test('model loading cannot attach a search to a position that changed while loading', async t => {

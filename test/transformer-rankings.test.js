@@ -36,7 +36,7 @@ test('rank snapshots expose ten entries per depth with stable IDs and legal cont
   }
 });
 
-test('live rank snapshots show a Candidate overtaking the former True leader after a reply changes its score', async () => {
+test('live rank snapshots promote an evaluated root contender after a reply refutes the former leader', async () => {
   const position = createPosition();
   const favorite = generateActions(position).next().value;
   const wanted = positionKey(favorite.position);
@@ -53,12 +53,15 @@ test('live rank snapshots show a Candidate overtaking the former True leader aft
   const next = reports.find(report => report.depth === 2).rankings[0];
   assert.equal(first.entries[0].evaluationType, 'true');
   assert.equal(first.entries[0].score, 1000);
-  assert.equal(next.entries[0].evaluationType, 'candidate');
+  assert.equal(next.entries[0].evaluationType, 'true');
   assert.equal(next.entries[0].score, 500);
   assert.notEqual(next.entries[0].id, first.entries[0].id);
   assert.equal(next.entries.find(entry => entry.id === first.entries[0].id).score, -400);
   assert.equal(first.entries[0].score, 1000, 'previous snapshots must remain immutable');
-  assert.deepEqual(result.bestAction, favorite.moves, 'a live heuristic leader must not replace the playable True result');
+  assert.notDeepEqual(result.bestAction, favorite.moves, 'an already evaluated contender replaces the refuted root move');
+  assert.equal(result.score, 500);
+  assert.equal(next.entries.find(entry => entry.id === first.entries[0].id).searchedReplies, 1);
+  assert.equal(next.entries.find(entry => entry.id === first.entries[0].id).staticScore, 1000);
 });
 
 test('deeper rank snapshots follow the current parent ranking before comparing sibling scores', async () => {

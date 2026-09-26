@@ -14,27 +14,29 @@ export function createInferenceQueue(runtime) {
     try {
       while (queue.length) {
         const request = queue.shift();
-        try { request.resolve(await runtime.evaluate(request.positions)); }
+        try { request.resolve(await request.run()); }
         catch (error) { request.reject(error); }
         finally { request.signal.removeEventListener('abort', request.cancel); }
       }
     } finally { running = false; }
   }
 
+  function enqueue(run, signal) {
+    if (signal.aborted) return Promise.reject(aborted());
+    return new Promise((resolve, reject) => {
+      const request = { run, signal, resolve, reject, cancel() {
+        const index = queue.indexOf(request);
+        if (index !== -1) queue.splice(index, 1);
+        signal.removeEventListener('abort', request.cancel);
+        reject(aborted());
+      } };
+      signal.addEventListener('abort', request.cancel, { once: true });
+      queue.push(request);
+      void drain();
+    });
+  }
   return {
-    evaluate(positions, { signal }) {
-      if (signal.aborted) return Promise.reject(aborted());
-      return new Promise((resolve, reject) => {
-        const request = { positions, signal, resolve, reject, cancel() {
-          const index = queue.indexOf(request);
-          if (index !== -1) queue.splice(index, 1);
-          signal.removeEventListener('abort', request.cancel);
-          reject(aborted());
-        } };
-        signal.addEventListener('abort', request.cancel, { once: true });
-        queue.push(request);
-        void drain();
-      });
-    },
+    evaluate(positions, { signal, ...options }) { return enqueue(() => runtime.evaluate(positions, options), signal); },
+    orderMoves(position, moves, { signal, ...options }) { return enqueue(() => runtime.orderMoves(position, moves, options), signal); },
   };
 }

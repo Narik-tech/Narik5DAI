@@ -12,6 +12,7 @@
     "test": "node --test",
     "benchmark": "node scripts/benchmark.js",
     "benchmark:parallel": "node scripts/benchmark-parallel.js",
+    "benchmark:transformer": "node scripts/benchmark-transformer.js",
     "strength": "node scripts/strength.js",
     "match": "node scripts/match.js",
     "selfplay": "node scripts/selfplay.js",

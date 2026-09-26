@@ -26,9 +26,10 @@ async function fixture(t, options = {}) {
     },
   });
   t.after(async () => { runtime.close(); await rm(directory, {recursive:true, force:true}); });
-  async function ready() {
+  async function ready(policy = false) {
     const starting = runtime.start();
-    children.at(-1).respond({ready:true, device:'cpu', model:{trainedSteps:1}});
+    children.at(-1).respond({ready:true, device:'cpu', model:{trainedSteps:1,
+      ...(policy ? {policyAvailable:true, policyTrainedSteps:1, policyVersion:1} : {})}});
     await starting;
     return children.at(-1);
   }
@@ -139,4 +140,119 @@ test('server close interrupts an HTTP request waiting for model startup', async 
 
 test('inference completion after worker disposal does not create an unhandled rejection', async () => {
   await forwardInference({postMessage() { throw new Error('disposed'); }}, {evaluate:async () => ({values:[0]})}, {type:'evaluate', id:1, positions:[{}]});
+});
+
+test('legacy models bypass policy inference while trained heads forward aligned scores', async t => {
+  const {runtime, ready} = await fixture(t);
+  const child = await ready();
+  assert.equal(await runtime.orderMoves({}, [[[0], [1]]]), null);
+  assert.equal(runtime.pending.size, 0);
+  runtime.stopProcess();
+  const trained = await ready(true);
+  const next = once(trained, 'request');
+  const ordered = runtime.orderMoves({board:[]}, [[[0], [1]], [[1], [2]]]);
+  const [request] = await next;
+  assert.equal(request.type, 'policy');
+  assert.equal(request.moves.length, 2);
+  trained.respond({id:request.id, scores:[-2.5, 4]});
+  assert.deepEqual(await ordered, [-2.5, 4]);
+  assert.equal(child.killed, true);
+});
+
+test('invalid policy reply shape fails closed and legacy forwarding reports unavailable', async t => {
+  for (const scores of [[], [1, 2], 'no', [null]]) {
+    const {runtime, ready} = await fixture(t);
+    const child = await ready(true);
+    const next = once(child, 'request');
+    const failed = assert.rejects(runtime.orderMoves({}, [[[0], [1]]]), /invalid policy scores/);
+    const [request] = await next;
+    child.respond({id:request.id, scores});
+    await failed;
+    assert.equal(child.killed, true);
+  }
+  let response;
+  await forwardInference({postMessage(message) { response = message; }}, {}, {type:'policy', id:7, position:{}, moves:[]});
+  assert.deepEqual(response, {type:'policyScores', id:7, scores:null});
+});
+
+test('policy readiness requires a supported version and completed policy updates', async t => {
+  for (const model of [{policyAvailable:true}, {policyAvailable:'yes'},
+    {policyAvailable:true, policyVersion:1, policyTrainedSteps:0}]) {
+    const {runtime, children} = await fixture(t);
+    const failed = assert.rejects(runtime.start(), /invalid policy metadata/);
+    children[0].respond({ready:true, device:'cpu', model});
+    await failed;
+  }
+});
+
+test('checkpoint reload rejects an analysis pinned to the old generation before sending values or policy', async t => {
+  const {runtime, children, checkpoint, ready} = await fixture(t);
+  await ready(true);
+  const oldGeneration = runtime.info.model.runtimeGeneration;
+  assert.equal(oldGeneration, 1);
+  const changed = new Date(Date.now() + 10000);
+  await utimes(checkpoint, changed, changed);
+  const rejected = assert.rejects(runtime.evaluate([{}], {runtimeGeneration:oldGeneration}), /checkpoint changed during analysis/);
+  assert.equal(children.length, 2);
+  let dispatched = 0;
+  const child = children[1];
+  child.on('request', () => { dispatched++; });
+  child.respond({ready:true, device:'cpu', model:{trainedSteps:2,
+    policyAvailable:true, policyTrainedSteps:1, policyVersion:1}});
+  await rejected;
+  const freshGeneration = runtime.info.model.runtimeGeneration;
+  assert.equal(freshGeneration, oldGeneration + 1);
+  await assert.rejects(runtime.orderMoves({}, [[[0], [1]]], {runtimeGeneration:oldGeneration}), /checkpoint changed during analysis/);
+  assert.equal(dispatched, 0);
+  assert.equal(runtime.pending.size, 0);
+  const next = once(child, 'request');
+  const evaluation = runtime.evaluate([{}], {runtimeGeneration:freshGeneration});
+  const [request] = await next;
+  child.respond({id:request.id, values:[13]});
+  assert.deepEqual(await evaluation, {id:request.id, values:[13], runtimeGeneration:freshGeneration});
+});
+
+test('inference responses retain their request generation when a new service readies before delivery', async t => {
+  const {runtime, ready} = await fixture(t);
+  const child = await ready(true);
+  const oldGeneration = runtime.info.model.runtimeGeneration;
+  const valueRequest = once(child, 'request');
+  const evaluation = runtime.evaluate([{}], {runtimeGeneration:oldGeneration});
+  const [value] = await valueRequest;
+  const policyRequest = once(child, 'request');
+  const ordering = runtime.orderMoves({}, [[[0], [1]]], {runtimeGeneration:oldGeneration, withMetadata:true});
+  const [policy] = await policyRequest;
+  // Resolve both service messages, then replace the child before their caller
+  // continuations run. Even a bogus Python generation cannot override ownership.
+  child.respond({id:value.id, values:[9], runtimeGeneration:999});
+  child.respond({id:policy.id, scores:[0.5], runtimeGeneration:999});
+  runtime.stopProcess();
+  const restarted = ready();
+  assert.equal(runtime.info.model.runtimeGeneration, oldGeneration + 1);
+  assert.equal((await evaluation).runtimeGeneration, oldGeneration);
+  assert.deepEqual(await ordering, {scores:[0.5], runtimeGeneration:oldGeneration});
+  await restarted;
+  assert.deepEqual(await runtime.orderMoves({}, [[[0], [1]]], {withMetadata:true}),
+    {scores:null, runtimeGeneration:oldGeneration + 1});
+});
+
+test('forwarding passes generation expectations and rejects mismatched value and policy results', async () => {
+  for (const type of ['evaluate', 'policy']) {
+    let response, received;
+    const runtime = type === 'evaluate'
+      ? {evaluate:async (positions, options) => { received = options; return {values:[0], runtimeGeneration:2}; }}
+      : {orderMoves:async (position, moves, options) => { received = options; return {scores:[0], runtimeGeneration:2}; }};
+    await forwardInference({postMessage(message) { response = message; }}, runtime,
+      {type, id:5, positions:[{}], position:{}, moves:[[]], runtimeGeneration:1});
+    assert.equal(received.runtimeGeneration, 1);
+    if (type === 'policy') assert.equal(received.withMetadata, true);
+    assert.match(response.error, /checkpoint changed during analysis/);
+    assert.equal(response.values, undefined);
+    assert.equal(response.scores, undefined);
+  }
+  let response;
+  await forwardInference({postMessage(message) { response = message; }},
+    {orderMoves:async () => ({scores:[0.25], runtimeGeneration:7})},
+    {type:'policy', id:6, position:{}, moves:[[]], runtimeGeneration:7});
+  assert.deepEqual(response, {type:'policyScores', id:6, scores:[0.25], runtimeGeneration:7});
 });
